@@ -1,9 +1,29 @@
+#include <metahook.h>
+#include <IPlugins.h>
+#include <cvardef.h>
 #include <windows.h>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <map>
+#include <string>
 
-// Real x86 executable smoke test: loads each DLL outside the game.
-// Verifies that the dynamic loader can resolve all imports and that the
-// MetaHook V4 interface factory exists. Does NOT claim in-game compatibility.
+// x86 loader smoke test: checks imports, CreateInterface(V4),
+// and registration without a real game engine or patching callbacks.
+namespace {
+std::map<std::string,cvar_t> vars;
+std::map<std::string,void(*)()> commands;
+cvar_t* reg(const char* name,const char* def,int flags) {
+    auto& c=vars[name?name:""];
+    c.flags=flags;
+    c.value=def?static_cast<float>(std::atof(def)):0.0f;
+    return &c;
+}
+int cmd(const char* name,void(*fn)()) {
+    if(name&&fn) commands[name]=fn;
+    return 1;
+}
+}
 using Factory=void* (__cdecl*)(const char*,int*);
 int main(int argc,char** argv) {
     if(argc<2) return 10;
@@ -15,17 +35,28 @@ int main(int argc,char** argv) {
             return 11;
         }
         auto factory=reinterpret_cast<Factory>(GetProcAddress(module,"CreateInterface"));
-        if(!factory) {
-            std::fprintf(stderr,"CreateInterface missing in %s\n",argv[i]);
-            return 12;
-        }
+        if(!factory) {std::fprintf(stderr,"CreateInterface missing: %s\n",argv[i]);return 12;}
         int result=-1;
-        void* iface=factory("METAHOOK_PLUGIN_API_VERSION004",&result);
-        if(!iface) {
-            std::fprintf(stderr,"IPluginsV4 interface missing in %s\n",argv[i]);
-            return 13;
+        auto* p=static_cast<IPluginsV4*>(factory(METAHOOK_PLUGIN_API_VERSION_V4,&result));
+        if(!p) {std::fprintf(stderr,"V4 interface missing: %s\n",argv[i]);return 13;}
+        vars.clear();
+        commands.clear();
+        cl_enginefunc_t engine={};
+        engine.pfnRegisterVariable=&reg;
+        engine.pfnAddCommand=&cmd;
+        p->Init(nullptr,nullptr,nullptr);
+        p->LoadEngine(&engine);
+        p->LoadClient(nullptr);
+        const bool isHud=std::strstr(argv[i],"HudEdit")!=nullptr;
+        const char* command=isHud?"hudedit_start":"sbxtma_start";
+        const char* cvar=isHud?"hudedit_inventory_x":"sbxtma_safe_mode";
+        if(!commands.count(command)||!vars.count(cvar)) {
+            std::fprintf(stderr,"Missing CVar or command after LoadEngine: %s\n",argv[i]);
+            return 14;
         }
-        std::printf("LoadLibrary/CreateInterface OK: %s\n",argv[i]);
+        p->Shutdown();
+        std::printf("LoadLibrary/CreateInterface/LoadEngine pass: %s (%u cvars, %u commands)\n",
+             argv[i],static_cast<unsigned>(vars.size()),static_cast<unsigned>(commands.size()));
         FreeLibrary(module);
     }
     return 0;
