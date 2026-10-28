@@ -1,7 +1,7 @@
 name: Build independent SvenBXT addons
 on:
   push:
-    branches: [master, 'feat/**']
+    branches: [master, 'feat/**', 'fix/**']
     tags: ['v*']
   pull_request:
   workflow_dispatch:
