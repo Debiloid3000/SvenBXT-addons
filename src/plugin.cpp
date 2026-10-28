@@ -3,6 +3,7 @@
 #include <pm_movevars.h>
 #include <cvardef.h>
 #include <in_buttons.h>
+#include <ref_params.h>
 #include <array>
 #include <algorithm>
 #include <cmath>
@@ -26,6 +27,7 @@ namespace {
 using namespace sbxtma;
 using MoveFn = void (*)(playermove_t*, int);
 using RedrawFn = int (*)(float, int);
+using ViewFn = void (*)(ref_params_t*);
 
 // Крашоустойчивый режим: заменяем функции в экспортной таблице клиента,
 // вместо изменения кода по адресу с InlineHook. MetaHook V4 разрешает это.
@@ -34,6 +36,7 @@ using ShutdownFn = void (*)();
 ShutdownFn originalShutdown=nullptr;
 MoveFn originalMovement = nullptr;
 RedrawFn originalRedraw = nullptr;
+ViewFn originalView = nullptr;
 cvar_t *mode = nullptr, *online = nullptr, *notify = nullptr;
 cvar_t *edgeEnabled = nullptr, *jumpEnabled = nullptr, *strafeEnabled = nullptr;
 cvar_t *pixelEnabled = nullptr, *boostEnabled = nullptr, *triggerWidth = nullptr;
@@ -193,6 +196,9 @@ public:
         }
         objectBoost(*pm);
     }
+    void setSpeed(float newSpeed) {
+        if(std::isfinite(newSpeed)) speed=clampf(newSpeed,0,50000);
+    }
     void draw() const { notifications.draw(speed, fpsHint); }
     void shutdown() { restoreFps(); resetFrame(); haveForecast = false; speed = fpsHint = 0; }
 
@@ -275,9 +281,13 @@ private:
 MovementAddon addon;
 
 void onMove(playermove_t* pm, int server) {
-    // Никаких обращений к структуре до оригинальной функции, пока игра
-    // инициализирует кадр. В режиме Assist используется прошлый прогноз.
-    const bool safe = enabled(safeMode);
+    // РЕЖИМ ПО УМОЛЧАНИЮ: никакой работы со структурой playermove_t,
+    // её ABI нельзя считать подтверждённым для неизвестной версии Sven.
+    if(enabled(safeMode)) {
+        if(originalMovement) originalMovement(pm,server);
+        return;
+    }
+    const bool safe = false;
     const bool sven = g_pMetaHookAPI && g_pMetaHookAPI->GetEngineType &&
                       g_pMetaHookAPI->GetEngineType() == ENGINE_SVENGINE;
     if(pm && !safe && mode && mode->value >= 1.5f) {
@@ -299,12 +309,18 @@ int onRedraw(float t, int intermission) {
     if (!intermission) addon.draw();
     return result;
 }
+void onView(ref_params_t* params) {
+    if(originalView) originalView(params);
+    // Камера поставляет реальную горизонтальную скорость, без чтения PM ABI.
+    if(params) addon.setSpeed(std::hypot(params->simvel[0],params->simvel[1]));
+}
 void onClientShutdown() {
     addon_log::write("movement","HUD_Shutdown");
     // Восстанавливаем экспортированные функции, пока таблица клиента жива.
     if(hookedExports) {
         if(hookedExports->HUD_PlayerMove==&onMove) hookedExports->HUD_PlayerMove=originalMovement;
         if(hookedExports->HUD_Redraw==&onRedraw) hookedExports->HUD_Redraw=originalRedraw;
+        if(hookedExports->V_CalcRefdef==&onView) hookedExports->V_CalcRefdef=originalView;
         if(hookedExports->HUD_Shutdown==&onClientShutdown)
             hookedExports->HUD_Shutdown=originalShutdown;
     }
@@ -323,6 +339,7 @@ void removeHooks() {
     sessionActive=false;
     originalMovement=nullptr;
     originalRedraw=nullptr;
+    originalView=nullptr;
     originalShutdown=nullptr;
 }
 void registerVariables() {
@@ -350,21 +367,23 @@ void activate() {
         return;
     }
     auto* exp=pendingExports;
-    if(!exp->HUD_PlayerMove || !exp->HUD_Redraw || !exp->HUD_Shutdown) {
+    if(!exp->HUD_PlayerMove || !exp->HUD_Redraw || !exp->V_CalcRefdef || !exp->HUD_Shutdown) {
         addon_log::write("movement","sbxtma_start missing client callbacks");
         return;
     }
     hookedExports=exp;
     originalMovement=exp->HUD_PlayerMove;
     originalRedraw=exp->HUD_Redraw;
+    originalView=exp->V_CalcRefdef;
     originalShutdown=exp->HUD_Shutdown;
     if(originalMovement==&onMove || originalRedraw==&onRedraw ||
-       originalShutdown==&onClientShutdown) {
+       originalView==&onView || originalShutdown==&onClientShutdown) {
         addon_log::write("movement","sbxtma_start rejected recursive callback");
         hookedExports=nullptr;return;
     }
     exp->HUD_PlayerMove=&onMove;
     exp->HUD_Redraw=&onRedraw;
+    exp->V_CalcRefdef=&onView;
     exp->HUD_Shutdown=&onClientShutdown;
     sessionActive=true;
     addon_log::write("movement","sbxtma_start callbacks attached");
@@ -377,6 +396,8 @@ void deactivate() {
             hookedExports->HUD_PlayerMove=originalMovement;
         if(hookedExports->HUD_Redraw==&onRedraw)
             hookedExports->HUD_Redraw=originalRedraw;
+        if(hookedExports->V_CalcRefdef==&onView)
+            hookedExports->V_CalcRefdef=originalView;
         if(hookedExports->HUD_Shutdown==&onClientShutdown)
             hookedExports->HUD_Shutdown=originalShutdown;
     }
