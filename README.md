@@ -15,6 +15,18 @@ hudedit_help
 
 Команда `hudedit_status` показывает в консоли, были ли возвращены указатели при регистрации `hudedit_inventory_x`, `hudedit_inventory_visible`, `hudedit_flashlight_r`, `hudedit_speed_x` и `hudedit_crosshair_size`, и видит ли эти CVars сам движок. Если `registered=yes`, но `engine_lookup=NO`, нужно исследовать совместимость CVar API с реальным билдом Sven Co-op. Если и `hudedit_status` неизвестна — запущена старая DLL или плагин вообще не загружен. Все этапы доступны также в `%TEMP%\SvenBXT_addons_boot.log`.
 
+Если консоль пишет `Unknown command` на `hudedit_inventory_x` **при успешном** `hudedit_init`, можно временно изменить значение через плагин:
+
+```cfg
+hudedit_set inventory_x 200
+hudedit_set inventory_y 100
+hudedit_set inventory_visible 1
+hudedit_set flashlight_r 0
+hudedit_set flashlight_g 255
+hudedit_set flashlight_b 255
+```
+
+`hudedit_set` использует уже зарегистрированный CVar, а не зависит только от обычного разрешения команды в консоли Sven Co-op. Если движок не применяет изменение по имени, значение меняется в памяти плагина на текущий сеанс; в таком случае **не гарантируется сохранение в конфиг**. Это диагностический обходной путь, не подтверждённое исправление причины.
 После успешной диагностики выполняйте `hudedit_start` для включения собственного HUD. Это отдельный этап: зарегистрированные CVars **не означают** включённые хуки отрисовки. Не используйте `hudedit_native_on` до подтверждения стабильности игры; штатные иконки/фонарик/название главы могут рисоваться вне GoldSrc API.
 
 ### Проверить Movement без повторного зависания на LoadEngine
