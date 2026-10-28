@@ -25,7 +25,7 @@ target_include_directories(SvenBXTMovement PRIVATE
     "${METAHOOK_SDK_DIR}/include/SourceSDK/tier3"
     "${METAHOOK_SDK_DIR}/include/SourceSDK/vstdlib"
     "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_compile_definitions(SvenBXTMovement PRIVATE WIN32 _WINDOWS _USRDLL NO_MALLOC_OVERRIDE _CRT_SECURE_NO_WARNINGS)
+target_compile_definitions(SvenBXTMovement PRIVATE WIN32 _WINDOWS _USRDLL NOMINMAX NO_MALLOC_OVERRIDE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(SvenBXTMovement PRIVATE /W3 /EHsc /MP /utf-8)
 set_target_properties(SvenBXTMovement PROPERTIES OUTPUT_NAME SvenBXTMovement)
 install(TARGETS SvenBXTMovement RUNTIME DESTINATION svencoop/metahook/plugins)
