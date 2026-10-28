@@ -793,8 +793,10 @@ void hudeditStatus() {
         if(gEngfuncs.Con_Printf)
             gEngfuncs.Con_Printf("HUD Edit: %-31s registered=%s engine_lookup=%s\n",
                 name,storedPtr?"yes":"NO",enginePtr?"yes":"NO");
-        if(!enginePtr || !storedPtr)
-            addon_log::write("hudedit","STATUS: missing registered CVar or engine lookup");
+        char detail[192]={};
+        std::snprintf(detail,sizeof(detail),"STATUS: %s registration=%s engine_lookup=%s",
+            name,storedPtr?"yes":"NO",enginePtr?"yes":"NO");
+        addon_log::write("hudedit",detail);
     }
     if(gEngfuncs.Con_Printf)
         gEngfuncs.Con_Printf(missing ?
