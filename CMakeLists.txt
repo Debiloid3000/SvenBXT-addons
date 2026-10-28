@@ -39,6 +39,8 @@ get_target_property(_svenbxt_include_dirs SvenBXTMovement INCLUDE_DIRECTORIES)
 target_include_directories(SvenBXTHudEdit PRIVATE ${_svenbxt_include_dirs})
 set(VGUI2EXTENSION_SDK_DIR "" CACHE PATH "Checkout of MetaHookSv/VGUI2Extension for optional Options tab")
 if(EXISTS "${VGUI2EXTENSION_SDK_DIR}/include/Interface/IVGUI2Extension.h")
+  include(cmake/HudEditVguiSources.cmake)
+  target_sources(SvenBXTHudEdit PRIVATE ${HUDEDIT_VGUI_SOURCES})
   target_include_directories(SvenBXTHudEdit PRIVATE
     "${VGUI2EXTENSION_SDK_DIR}/include/Interface"
     "${VGUI2EXTENSION_SDK_DIR}/include/Interface/VGUI"
@@ -50,7 +52,7 @@ else()
   message(FATAL_ERROR "To build the Options tab, provide -DVGUI2EXTENSION_SDK_DIR=<checkout of MetaHookSv/VGUI2Extension>")
 endif()
 target_compile_definitions(SvenBXTHudEdit PRIVATE WIN32 _WINDOWS _USRDLL NOMINMAX NO_MALLOC_OVERRIDE _CRT_SECURE_NO_WARNINGS)
-target_compile_options(SvenBXTHudEdit PRIVATE /W3 /EHsc /MP /utf-8)
+target_compile_options(SvenBXTHudEdit PRIVATE /W3 /EHsc /MP /utf-8 /permissive /wd4291 /wd4311 /wd4312 /wd4819 /wd4996)
 set_target_properties(SvenBXTHudEdit PROPERTIES OUTPUT_NAME SvenBXTHudEdit)
 install(TARGETS SvenBXTHudEdit RUNTIME DESTINATION svencoop/metahook/plugins)
 
