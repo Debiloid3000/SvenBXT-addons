@@ -29,3 +29,15 @@ target_compile_definitions(SvenBXTMovement PRIVATE WIN32 _WINDOWS _USRDLL NOMINM
 target_compile_options(SvenBXTMovement PRIVATE /W3 /EHsc /MP /utf-8)
 set_target_properties(SvenBXTMovement PROPERTIES OUTPUT_NAME SvenBXTMovement)
 install(TARGETS SvenBXTMovement RUNTIME DESTINATION svencoop/metahook/plugins)
+
+# A second, fully independent DLL. Movement can be installed without HUD Edit.
+add_library(SvenBXTHudEdit SHARED
+    src/hudedit.cpp
+    "${METAHOOK_SDK_DIR}/include/HLSDK/common/interface.cpp")
+get_target_property(_svenbxt_include_dirs SvenBXTMovement INCLUDE_DIRECTORIES)
+target_include_directories(SvenBXTHudEdit PRIVATE ${_svenbxt_include_dirs})
+target_compile_definitions(SvenBXTHudEdit PRIVATE WIN32 _WINDOWS _USRDLL NOMINMAX NO_MALLOC_OVERRIDE _CRT_SECURE_NO_WARNINGS)
+target_compile_options(SvenBXTHudEdit PRIVATE /W3 /EHsc /MP /utf-8)
+set_target_properties(SvenBXTHudEdit PROPERTIES OUTPUT_NAME SvenBXTHudEdit)
+install(TARGETS SvenBXTHudEdit RUNTIME DESTINATION svencoop/metahook/plugins)
+

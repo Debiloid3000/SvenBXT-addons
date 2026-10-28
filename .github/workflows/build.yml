@@ -1,4 +1,4 @@
-name: Windows x86 Movement DLL
+name: Build independent SvenBXT addons
 on:
   push:
     branches: [master, 'feat/**']
@@ -14,58 +14,79 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fetch official MetaHook SDK
         run: git clone --depth 1 https://github.com/MetaHookSv/MetaHook.git metahook-sdk
-      - name: Configure
+      - name: Configure both independent DLLs
         shell: pwsh
         run: cmake -S . -B build -G "Visual Studio 17 2022" -A Win32 -DMETAHOOK_SDK_DIR="$env:GITHUB_WORKSPACE/metahook-sdk"
-      - name: Compile DLL
+      - name: Build DLLs
         run: cmake --build build --config Release --parallel 2
-      - name: Check DLL
+      - name: Verify both DLLs
         shell: pwsh
         run: |
-          if (!(Test-Path "build/Release/SvenBXTMovement.dll")) { throw "DLL missing" }
+          foreach ($dll in @("SvenBXTMovement.dll", "SvenBXTHudEdit.dll")) {
+            if (!(Test-Path "build/Release/$dll")) { throw "Missing $dll" }
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: SvenBXTMovement-Windows-x86
           path: build/Release/SvenBXTMovement.dll
           if-no-files-found: error
-      - name: Publish tagged release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SvenBXTHudEdit-Windows-x86
+          path: build/Release/SvenBXTHudEdit.dll
+          if-no-files-found: error
+      - name: Publish version release with separate DLL files
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$env:GITHUB_REF_NAME" build/Release/SvenBXTMovement.dll --repo "$env:GITHUB_REPOSITORY" --verify-tag --generate-notes
-  release-nightly:
-    name: Publish DLL to Releases
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = $env:GITHUB_REF_NAME
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag build/Release/SvenBXTMovement.dll build/Release/SvenBXTHudEdit.dll --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            gh release create $tag build/Release/SvenBXTMovement.dll build/Release/SvenBXTHudEdit.dll --repo $env:GITHUB_REPOSITORY --verify-tag --generate-notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Release publication failed" }
+  math-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and test independent movement formulas
+        run: |
+          c++ -std=c++17 -O2 -Wall -Wextra -pedantic -Isrc tests/movement_math_tests.cpp -o math_tests
+          ./math_tests
+  nightly:
+    name: Publish independent DLLs in nightly Release
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     needs: [windows, math-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    concurrency:
+      group: svenbxt-addons-nightly
+      cancel-in-progress: false
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: SvenBXTMovement-Windows-x86
+          pattern: SvenBXT*-Windows-x86
           path: dist
-      - name: Create or update nightly Release
+          merge-multiple: true
+      - name: Create/update release with both individual DLLs
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
         run: |
           set -euo pipefail
           test -s dist/SvenBXTMovement.dll
+          test -s dist/SvenBXTHudEdit.dll
           if gh release view nightly --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload nightly dist/SvenBXTMovement.dll --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload nightly dist/SvenBXTMovement.dll dist/SvenBXTHudEdit.dll --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create nightly dist/SvenBXTMovement.dll \
+            gh release create nightly dist/SvenBXTMovement.dll dist/SvenBXTHudEdit.dll \
               --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-              --title "Movement Addon Nightly" --prerelease \
-              --notes "Automatically compiled Windows x86 DLL. Runtime behavior requires testing."
+              --title "SvenBXT Addons Nightly" --prerelease \
+              --notes "Independent experimental x86 DLLs. Install either addon or both. Runtime validation required."
           fi
-  math-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Compile and test movement formulas
-        run: |
-          c++ -std=c++17 -O2 -Wall -Wextra -pedantic -Isrc tests/movement_math_tests.cpp -o math_tests
-          ./math_tests
