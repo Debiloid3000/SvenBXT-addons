@@ -316,7 +316,7 @@ void registerGroup(HudGroup& group,const char* key,bool defaultEnabled,
 void settings() {
     reg(active,"hudedit_enabled","1");
     cvar_t* version=nullptr;
-    reg(version,"hudedit_version","2.1.0");
+    version=gEngfuncs.pfnRegisterVariable?gEngfuncs.pfnRegisterVariable("hudedit_version","2.1.0",0):nullptr;
     reg(r,"hudedit_r","100"); reg(g,"hudedit_g","130"); reg(b,"hudedit_b","200");
     reg(lowR,"hudedit_critical_r","250");reg(lowG,"hudedit_critical_g","25");
     reg(lowB,"hudedit_critical_b","45");reg(critical,"hudedit_critical_hp","25");
@@ -602,6 +602,7 @@ void cleanup() {
     redrawHook=initHook=viewHook=spriteHook=scaleHook=nullptr;
     drawHook=drawAdditiveHook=drawHolesHook=textColorHook=nullptr;
     consoleHook=fillHook=nullptr;
+    nativeHooksEnabled=false;
     oldRedraw=nullptr;oldInit=nullptr;oldView=nullptr;oldSprite=nullptr;oldScale=nullptr;
     oldDraw=nullptr;oldDrawAdditive=nullptr;oldDrawHoles=nullptr;oldTextColor=nullptr;
     oldConsole=nullptr;oldFill=nullptr;
@@ -667,12 +668,17 @@ void startHud() {
     hudSessionActive=true;
     wasEverActivated=true;
     // Existing usermessage callbacks may be registered by this time.
-    if(!msgHooksInstalled && g_pMetaHookAPI && g_pMetaHookAPI->HookUserMsg) {
-        oldHealthMessage=g_pMetaHookAPI->HookUserMsg("Health",&onHealth);
-        oldArmorMessage=g_pMetaHookAPI->HookUserMsg("Battery",&onArmor);
-        msgHooksInstalled=true;
-    }
+    // UserMsg hooks have a different lifecycle and may leave callbacks inside
+    // client.dll after a plugin unload. They are intentionally opt-in below.
     addon_log::write("hudedit","hudedit_start client callbacks attached");
+}
+void enableMessages() {
+    addon_log::write("hudedit","hudedit_messages_on requested");
+    if(!hudSessionActive || msgHooksInstalled || !g_pMetaHookAPI ||
+       !g_pMetaHookAPI->HookUserMsg) return;
+    oldHealthMessage=g_pMetaHookAPI->HookUserMsg("Health",&onHealth);
+    oldArmorMessage=g_pMetaHookAPI->HookUserMsg("Battery",&onArmor);
+    msgHooksInstalled=true;
 }
 void enableNativeHooks() {
     addon_log::write("hudedit","hudedit_native_on requested");
@@ -746,6 +752,7 @@ void IPluginsV4::LoadEngine(cl_enginefunc_t* engine) {
     if(!safeCommandsRegistered && gEngfuncs.pfnAddCommand) {
         gEngfuncs.pfnAddCommand("hudedit_start",&startHud);
         gEngfuncs.pfnAddCommand("hudedit_stop",&stopHud);
+        gEngfuncs.pfnAddCommand("hudedit_messages_on",&enableMessages);
         gEngfuncs.pfnAddCommand("hudedit_native_on",&enableNativeHooks);
         gEngfuncs.pfnAddCommand("hudedit_native_off",&disableNativeHooks);
         safeCommandsRegistered=true;
