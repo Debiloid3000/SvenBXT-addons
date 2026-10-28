@@ -3,6 +3,7 @@
 #include <pm_movevars.h>
 #include <cvardef.h>
 #include <in_buttons.h>
+#include <ref_params.h>
 #include <array>
 #include <algorithm>
 #include <cmath>
@@ -10,6 +11,7 @@
 #include <cstring>
 #include <string>
 #include "movement_math.hpp"
+#include "startup_diagnostics.hpp"
 
 // Самостоятельный MetaHookSv V4 плагин. Никаких невалидированных адресов PM_PlayerMove.
 // HUD_PlayerMove — безопасный клиентский вход с playermove_t*, который вызывает PM_Move.
@@ -25,6 +27,7 @@ namespace {
 using namespace sbxtma;
 using MoveFn = void (*)(playermove_t*, int);
 using RedrawFn = int (*)(float, int);
+using ViewFn = void (*)(ref_params_t*);
 
 // Крашоустойчивый режим: заменяем функции в экспортной таблице клиента,
 // вместо изменения кода по адресу с InlineHook. MetaHook V4 разрешает это.
@@ -33,10 +36,15 @@ using ShutdownFn = void (*)();
 ShutdownFn originalShutdown=nullptr;
 MoveFn originalMovement = nullptr;
 RedrawFn originalRedraw = nullptr;
+ViewFn originalView = nullptr;
 cvar_t *mode = nullptr, *online = nullptr, *notify = nullptr;
 cvar_t *edgeEnabled = nullptr, *jumpEnabled = nullptr, *strafeEnabled = nullptr;
 cvar_t *pixelEnabled = nullptr, *boostEnabled = nullptr, *triggerWidth = nullptr;
 cvar_t *predictionEnabled=nullptr,*safeMode=nullptr,*addonVersion=nullptr;
+cl_exportfuncs_t* pendingExports=nullptr;
+bool activationRequested=false;
+bool movementCommandRegistered=false;
+bool sessionActive=false;
 bool enabled(cvar_t* c) { return c && c->value > 0.5f; }
 float now() { return gEngfuncs.GetClientTime ? gEngfuncs.GetClientTime() : 0.f; }
 
@@ -188,6 +196,9 @@ public:
         }
         objectBoost(*pm);
     }
+    void setSpeed(float newSpeed) {
+        if(std::isfinite(newSpeed)) speed=clampf(newSpeed,0,50000);
+    }
     void draw() const { notifications.draw(speed, fpsHint); }
     void shutdown() { restoreFps(); resetFrame(); haveForecast = false; speed = fpsHint = 0; }
 
@@ -270,9 +281,13 @@ private:
 MovementAddon addon;
 
 void onMove(playermove_t* pm, int server) {
-    // Никаких обращений к структуре до оригинальной функции, пока игра
-    // инициализирует кадр. В режиме Assist используется прошлый прогноз.
-    const bool safe = enabled(safeMode);
+    // РЕЖИМ ПО УМОЛЧАНИЮ: никакой работы со структурой playermove_t,
+    // её ABI нельзя считать подтверждённым для неизвестной версии Sven.
+    if(enabled(safeMode)) {
+        if(originalMovement) originalMovement(pm,server);
+        return;
+    }
+    const bool safe = false;
     const bool sven = g_pMetaHookAPI && g_pMetaHookAPI->GetEngineType &&
                       g_pMetaHookAPI->GetEngineType() == ENGINE_SVENGINE;
     if(pm && !safe && mode && mode->value >= 1.5f) {
@@ -294,25 +309,37 @@ int onRedraw(float t, int intermission) {
     if (!intermission) addon.draw();
     return result;
 }
+void onView(ref_params_t* params) {
+    if(originalView) originalView(params);
+    // Камера поставляет реальную горизонтальную скорость, без чтения PM ABI.
+    if(params) addon.setSpeed(std::hypot(params->simvel[0],params->simvel[1]));
+}
 void onClientShutdown() {
+    addon_log::write("movement","HUD_Shutdown");
     // Восстанавливаем экспортированные функции, пока таблица клиента жива.
     if(hookedExports) {
         if(hookedExports->HUD_PlayerMove==&onMove) hookedExports->HUD_PlayerMove=originalMovement;
         if(hookedExports->HUD_Redraw==&onRedraw) hookedExports->HUD_Redraw=originalRedraw;
+        if(hookedExports->V_CalcRefdef==&onView) hookedExports->V_CalcRefdef=originalView;
         if(hookedExports->HUD_Shutdown==&onClientShutdown)
             hookedExports->HUD_Shutdown=originalShutdown;
     }
-    hookedExports=nullptr;
+    hookedExports=nullptr;pendingExports=nullptr;
+    sessionActive=false;
     if(originalShutdown) originalShutdown();
     addon.shutdown();
 }
 void removeHooks() {
+    addon_log::write("movement","removeHooks");
     addon.shutdown();
     // Нельзя разыменовывать экспортную таблицу после выгрузки client.dll.
     // onClientShutdown восстанавливает указатели до выгрузки.
     hookedExports=nullptr;
+    pendingExports=nullptr;
+    sessionActive=false;
     originalMovement=nullptr;
     originalRedraw=nullptr;
+    originalView=nullptr;
     originalShutdown=nullptr;
 }
 void registerVariables() {
@@ -328,32 +355,81 @@ void registerVariables() {
     triggerWidth = gEngfuncs.pfnRegisterVariable("sbxtma_trigger_width", "0", FCVAR_ARCHIVE);
     predictionEnabled=gEngfuncs.pfnRegisterVariable("sbxtma_prediction", "0", FCVAR_ARCHIVE);
     safeMode=gEngfuncs.pfnRegisterVariable("sbxtma_safe_mode", "1", FCVAR_ARCHIVE);
-    addonVersion=gEngfuncs.pfnRegisterVariable("sbxtma_version", "2.0.0", 0);
+    addonVersion=gEngfuncs.pfnRegisterVariable("sbxtma_version", "2.1.0", 0);
+}
+// Start the hooks only when explicitly requested in a RUNNING game.
+// A successful LoadLibrary must never install a client detour.
+void activate() {
+    addon_log::write("movement","sbxtma_start requested");
+    activationRequested=true;
+    if(sessionActive || !pendingExports) {
+        addon_log::write("movement","sbxtma_start unavailable: client callbacks not ready");
+        return;
+    }
+    auto* exp=pendingExports;
+    if(!exp->HUD_PlayerMove || !exp->HUD_Redraw || !exp->V_CalcRefdef || !exp->HUD_Shutdown) {
+        addon_log::write("movement","sbxtma_start missing client callbacks");
+        return;
+    }
+    hookedExports=exp;
+    originalMovement=exp->HUD_PlayerMove;
+    originalRedraw=exp->HUD_Redraw;
+    originalView=exp->V_CalcRefdef;
+    originalShutdown=exp->HUD_Shutdown;
+    if(originalMovement==&onMove || originalRedraw==&onRedraw ||
+       originalView==&onView || originalShutdown==&onClientShutdown) {
+        addon_log::write("movement","sbxtma_start rejected recursive callback");
+        hookedExports=nullptr;return;
+    }
+    exp->HUD_PlayerMove=&onMove;
+    exp->HUD_Redraw=&onRedraw;
+    exp->V_CalcRefdef=&onView;
+    exp->HUD_Shutdown=&onClientShutdown;
+    sessionActive=true;
+    addon_log::write("movement","sbxtma_start callbacks attached");
+}
+void deactivate() {
+    addon_log::write("movement","sbxtma_stop");
+    activationRequested=false;
+    if(sessionActive && hookedExports) {
+        if(hookedExports->HUD_PlayerMove==&onMove)
+            hookedExports->HUD_PlayerMove=originalMovement;
+        if(hookedExports->HUD_Redraw==&onRedraw)
+            hookedExports->HUD_Redraw=originalRedraw;
+        if(hookedExports->V_CalcRefdef==&onView)
+            hookedExports->V_CalcRefdef=originalView;
+        if(hookedExports->HUD_Shutdown==&onClientShutdown)
+            hookedExports->HUD_Shutdown=originalShutdown;
+    }
+    hookedExports=nullptr;
+    sessionActive=false;
+    addon.shutdown();
 }
 } // namespace
 
 void IPluginsV4::Init(metahook_api_t* api, mh_interface_t* interfaces, mh_enginesave_t* save) {
     g_pMetaHookAPI = api; g_pInterface = interfaces; g_pMetaSave = save;
+    addon_log::write("movement","V4 Init");
 }
 void IPluginsV4::LoadEngine(cl_enginefunc_t* funcs) {
     if (!funcs) return;
     gEngfuncs = *funcs;
+    addon_log::write("movement","LoadEngine begin");
     registerVariables();
+    if(!movementCommandRegistered && gEngfuncs.pfnAddCommand) {
+        gEngfuncs.pfnAddCommand("sbxtma_start",&activate);
+        gEngfuncs.pfnAddCommand("sbxtma_stop",&deactivate);
+        movementCommandRegistered=true;
+    }
+    addon_log::write("movement","LoadEngine completed (passive)");
 }
 void IPluginsV4::LoadClient(cl_exportfuncs_t* exports) {
-    if(!exports || hookedExports) return;
-    // Never mutate client executable code: only swap the public callback table.
-    if(!exports->HUD_PlayerMove || !exports->HUD_Redraw ||
-       !exports->HUD_Shutdown) return;
-    hookedExports=exports;
-    originalMovement=exports->HUD_PlayerMove;
-    originalRedraw=exports->HUD_Redraw;
-    originalShutdown=exports->HUD_Shutdown;
-    exports->HUD_PlayerMove=&onMove;
-    exports->HUD_Redraw=&onRedraw;
-    exports->HUD_Shutdown=&onClientShutdown;
+    addon_log::write("movement","LoadClient (no automatic hooks)");
+    pendingExports=exports;
+    // Startup safety is mandatory. Even an archived mode=2 must not
+    // overwrite client callbacks before user explicitly enables them.
 }
-void IPluginsV4::Shutdown() { removeHooks(); }
-void IPluginsV4::ExitGame(int) { removeHooks(); }
-const char* IPluginsV4::GetVersion() { return "0.1.0"; }
+void IPluginsV4::Shutdown() { addon_log::write("movement","V4 Shutdown"); removeHooks(); }
+void IPluginsV4::ExitGame(int) { addon_log::write("movement","V4 ExitGame"); removeHooks(); }
+const char* IPluginsV4::GetVersion() { return "2.1.0-safe"; }
 EXPOSE_SINGLE_INTERFACE(IPluginsV4, IPluginsV4, METAHOOK_PLUGIN_API_VERSION_V4);
