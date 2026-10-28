@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <array>
 #include "hudedit_layout.hpp"
 #include "hudedit_regions.hpp"
 #include "startup_diagnostics.hpp"
@@ -95,6 +96,9 @@ cvar_t *inventoryRegionW=nullptr, *inventoryRegionH=nullptr, *inventoryMargin=nu
 struct HudGroup {
     cvar_t *enabled=nullptr,*visible=nullptr,*x=nullptr,*y=nullptr,*regionX=nullptr,*regionY=nullptr,*regionW=nullptr,*regionH=nullptr;
     cvar_t *useTheme=nullptr,*red=nullptr,*green=nullptr,*blue=nullptr;
+    // Names must remain valid for the entire game session. The old local
+    // 'char name[96]' went out of scope immediately after registration.
+    std::array<std::array<char,96>,12> persistentNames{};
 };
 HudGroup inventory, flashlight, chapter;
 cvar_t *healthNR=nullptr,*healthNG=nullptr,*healthNB=nullptr,*healthNTheme=nullptr;
@@ -299,11 +303,11 @@ void reg(cvar_t*& dest,const char* name,const char* value) {
 }
 void registerGroup(HudGroup& group,const char* key,bool defaultEnabled,
                    const char* left,const char* top,const char* width,const char* height) {
-    // CVar names are stable and independent per block; use normal archived CVars.
-    char name[96];
+    size_t slot=0;
     auto make=[&](cvar_t*& ptr,const char* suffix,const char* value) {
-        std::snprintf(name,sizeof(name),"hudedit_%s_%s",key,suffix);
-        reg(ptr,name,value);
+        auto& name=group.persistentNames.at(slot++);
+        std::snprintf(name.data(),name.size(),"hudedit_%s_%s",key,suffix);
+        reg(ptr,name.data(),value);
     };
     make(group.enabled,"enabled",defaultEnabled?"1":"0");
     make(group.visible,"visible","1");
@@ -314,7 +318,9 @@ void registerGroup(HudGroup& group,const char* key,bool defaultEnabled,
     make(group.red,"r","255");make(group.green,"g","255");make(group.blue,"b","255");
 }
 void settings() {
+    addon_log::write("hudedit","settings begin (user-triggered)");
     reg(active,"hudedit_enabled","1");
+    addon_log::write("hudedit","settings: base CVars entered");
     cvar_t* version=nullptr;
     version=gEngfuncs.pfnRegisterVariable?gEngfuncs.pfnRegisterVariable("hudedit_version","2.1.0",0):nullptr;
     reg(r,"hudedit_r","100"); reg(g,"hudedit_g","130"); reg(b,"hudedit_b","200");
@@ -347,11 +353,17 @@ void settings() {
     reg(inventoryRegionW,"hudedit_inventory_region_w","210");
     reg(inventoryRegionH,"hudedit_inventory_region_h","170");
     reg(inventoryMargin,"hudedit_inventory_margin","12");
+    addon_log::write("hudedit","settings: before inventory group");
     registerGroup(inventory,"inventory",true,"0","0","210","170");
+    addon_log::write("hudedit","settings: inventory group done");
     // Flashlight and chapter text are not always rendered through GoldSrc draw APIs.
     // Opt-in regions avoid accidentally catching HP/ammo/other map titles.
+    addon_log::write("hudedit","settings: before flashlight group");
     registerGroup(flashlight,"flashlight",false,"0","-105","85","65");
+    addon_log::write("hudedit","settings: flashlight group done");
+    addon_log::write("hudedit","settings: before chapter group");
     registerGroup(chapter,"chapter",false,"180","0","650","110");
+    addon_log::write("hudedit","settings: chapter group done");
     reg(healthNTheme,"hudedit_health_number_use_theme","1");
     reg(healthNR,"hudedit_health_number_r","255");
     reg(healthNG,"hudedit_health_number_g","255");
@@ -385,6 +397,7 @@ void settings() {
     reg(chOutlineRed,"hudedit_crosshair_outline_r","0");
     reg(chOutlineGreen,"hudedit_crosshair_outline_g","0");
     reg(chOutlineBlue,"hudedit_crosshair_outline_b","0");
+    addon_log::write("hudedit","settings complete");
 }
 bool canDraw() {
     return yes(active) && gEngfuncs.pfnGetScreenInfo &&
@@ -733,35 +746,59 @@ void disableNativeHooks() {
 }
 } // namespace
 
-void IPluginsV4::Init(metahook_api_t* api,mh_interface_t* i,mh_enginesave_t* save) {
-    g_pMetaHookAPI=api;g_pInterface=i;g_pMetaSave=save;
-    addon_log::write("hudedit","V4 Init");
-}
-void IPluginsV4::LoadEngine(cl_enginefunc_t* engine) {
-    if(!engine) return;
-    gEngfuncs=*engine;
-    addon_log::write("hudedit","LoadEngine begin");
-    if(!settingsRegistered && gEngfuncs.pfnRegisterVariable) {
+namespace {
+// Initialize advanced cvars ONLY after Sven Co-op main menu has opened,
+// and the player explicitly enters hudedit_init.
+void lazyInitialize() {
+    addon_log::write("hudedit","hudedit_init invoked");
+    if(!settingsRegistered) {
+        if(!gEngfuncs.pfnRegisterVariable) {
+            addon_log::write("hudedit","hudedit_init no CVar registration API");
+            return;
+        }
         settings();
         settingsRegistered=true;
     }
     if(!colorCommandRegistered && gEngfuncs.pfnAddCommand) {
+        addon_log::write("hudedit","hudedit_init before extra commands");
         gEngfuncs.pfnAddCommand("hudedit_color",&changeColorCommand);
-        colorCommandRegistered=true;
-    }
-    if(!safeCommandsRegistered && gEngfuncs.pfnAddCommand) {
         gEngfuncs.pfnAddCommand("hudedit_start",&startHud);
         gEngfuncs.pfnAddCommand("hudedit_stop",&stopHud);
         gEngfuncs.pfnAddCommand("hudedit_messages_on",&enableMessages);
         gEngfuncs.pfnAddCommand("hudedit_native_on",&enableNativeHooks);
         gEngfuncs.pfnAddCommand("hudedit_native_off",&disableNativeHooks);
-        safeCommandsRegistered=true;
+        colorCommandRegistered=true;
+        addon_log::write("hudedit","hudedit_init extra commands complete");
     }
-    addon_log::write("hudedit","LoadEngine completed (passive)");
+    addon_log::write("hudedit","hudedit_init completed");
+}
+} // namespace
+
+void IPluginsV4::Init(metahook_api_t* api,mh_interface_t* i,mh_enginesave_t* save) {
+    g_pMetaHookAPI=api;g_pInterface=i;g_pMetaSave=save;
+    addon_log::write("hudedit","V4 Init");
+}
+void IPluginsV4::LoadEngine(cl_enginefunc_t* engine) {
+    addon_log::write("hudedit","LoadEngine entry");
+    if(!engine) {
+        addon_log::write("hudedit","LoadEngine engine ptr null");
+        return;
+    }
+    gEngfuncs=*engine;
+    // No calls to engine pfnRegisterVariable or pfnAddCommand in LoadEngine.
+    // These were the only actions between begin and the failed startup log.
+    addon_log::write("hudedit","LoadEngine completed (zero registrations)");
 }
 void IPluginsV4::LoadClient(cl_exportfuncs_t* exports) {
+    addon_log::write("hudedit","LoadClient entry");
     pendingExports=exports;
-    addon_log::write("hudedit","LoadClient (no automatic hooks)");
+    if(!safeCommandsRegistered && gEngfuncs.pfnAddCommand) {
+        addon_log::write("hudedit","LoadClient before hudedit_init command");
+        gEngfuncs.pfnAddCommand("hudedit_init",&lazyInitialize);
+        safeCommandsRegistered=true;
+        addon_log::write("hudedit","LoadClient hudedit_init command registered");
+    }
+    addon_log::write("hudedit","LoadClient completed (no engine hooks)");
 }
 void IPluginsV4::ExitGame(int) {
     addon_log::write("hudedit","V4 ExitGame");

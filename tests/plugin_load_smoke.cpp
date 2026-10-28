@@ -7,13 +7,16 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <vector>
 
 // x86 loader smoke test: checks imports, CreateInterface(V4),
 // and registration without a real game engine or patching callbacks.
 namespace {
 std::map<std::string,cvar_t> vars;
 std::map<std::string,void(*)()> commands;
+std::vector<const char*> namePointers;
 cvar_t* reg(const char* name,const char* def,int flags) {
+    namePointers.push_back(name);
     auto& c=vars[name?name:""];
     c.flags=flags;
     c.value=def?static_cast<float>(std::atof(def)):0.0f;
@@ -41,6 +44,7 @@ int main(int argc,char** argv) {
         if(!p) {std::fprintf(stderr,"V4 interface missing: %s\n",argv[i]);return 13;}
         vars.clear();
         commands.clear();
+        namePointers.clear();
         cl_enginefunc_t engine={};
         engine.pfnRegisterVariable=&reg;
         engine.pfnAddCommand=&cmd;
@@ -58,11 +62,31 @@ int main(int argc,char** argv) {
             return 15;
         }
         const bool isHud=std::strstr(argv[i],"HudEdit")!=nullptr;
-        const char* command=isHud?"hudedit_start":"sbxtma_start";
-        const char* cvar=isHud?"hudedit_inventory_x":"sbxtma_safe_mode";
-        if(!commands.count(command)||!vars.count(cvar)) {
-            std::fprintf(stderr,"Missing CVar or command after LoadEngine: %s\n",argv[i]);
-            return 14;
+        if(isHud) {
+            if(!commands.count("hudedit_init") || !vars.empty()) {
+                std::fprintf(stderr,"HUD Edit must only register hudedit_init during startup: %s\n",argv[i]);
+                return 14;
+            }
+            commands.at("hudedit_init")();
+            if(!commands.count("hudedit_start") || !vars.count("hudedit_inventory_x") ||
+               !vars.count("hudedit_flashlight_y")) {
+                std::fprintf(stderr,"HUD Edit lazy init did not register settings: %s\n",argv[i]);
+                return 16;
+            }
+            // Ensure the engine can retain names in the original pointer form.
+            bool sawInventoryX=false,sawFlashlightY=false;
+            for(const char* ptr:namePointers) {
+                if(!ptr) continue;
+                if(std::strcmp(ptr,"hudedit_inventory_x")==0) sawInventoryX=true;
+                if(std::strcmp(ptr,"hudedit_flashlight_y")==0) sawFlashlightY=true;
+            }
+            if(!sawInventoryX||!sawFlashlightY) {
+                std::fprintf(stderr,"CVar names became dangling pointers after registration\n");
+                return 17;
+            }
+        } else if(!commands.count("sbxtma_start") || !vars.count("sbxtma_safe_mode")) {
+            std::fprintf(stderr,"Movement did not register expected CVar/command: %s\n",argv[i]);
+            return 18;
         }
         p->Shutdown();
         std::printf("LoadLibrary/CreateInterface/LoadEngine pass: %s (%u cvars, %u commands)\n",
