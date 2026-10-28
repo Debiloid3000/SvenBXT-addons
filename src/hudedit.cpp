@@ -36,6 +36,7 @@ ScaleFn oldScale = nullptr;
 pfnUserMsgHook oldHealthMessage = nullptr;
 pfnUserMsgHook oldArmorMessage = nullptr;
 bool msgHooksInstalled = false;
+bool settingsRegistered = false;
 
 cvar_t *active=nullptr, *r=nullptr, *g=nullptr, *b=nullptr;
 cvar_t *lowR=nullptr, *lowG=nullptr, *lowB=nullptr, *critical=nullptr;
@@ -266,6 +267,11 @@ int onRedraw(float t,int intermission) {
 }
 void onHudInit() {
     if(oldInit)oldInit();
+    // Регистрируем настройки только после готовности клиентского HUD.
+    if(!settingsRegistered) {
+        settings();
+        settingsRegistered=true;
+    }
     if(!msgHooksInstalled && g_pMetaHookAPI && g_pMetaHookAPI->HookUserMsg) {
         oldHealthMessage=g_pMetaHookAPI->HookUserMsg("Health",&onHealth);
         oldArmorMessage=g_pMetaHookAPI->HookUserMsg("Battery",&onArmor);
@@ -274,6 +280,11 @@ void onHudInit() {
 }
 void cleanup() {
     restoreSettings();
+    // При выгрузке DLL нельзя оставлять указатели usermsg-хуков в нашей памяти.
+    if (msgHooksInstalled && g_pMetaHookAPI && g_pMetaHookAPI->HookUserMsg) {
+        if (oldHealthMessage) g_pMetaHookAPI->HookUserMsg("Health",oldHealthMessage);
+        if (oldArmorMessage) g_pMetaHookAPI->HookUserMsg("Battery",oldArmorMessage);
+    }
     if (g_pMetaHookAPI) {
         if(redrawHook)g_pMetaHookAPI->UnHook(redrawHook);
         if(initHook)g_pMetaHookAPI->UnHook(initHook);
@@ -286,6 +297,7 @@ void cleanup() {
     // User-message hooks are scoped to the client DLL's lifetime; they are not
     // replaced with invalid stale function pointers after client reload.
     msgHooksInstalled=false;oldHealthMessage=oldArmorMessage=nullptr;
+    settingsRegistered=false;
     health=armor=-1;speed=0;
 }
 } // namespace
@@ -296,7 +308,6 @@ void IPluginsV4::Init(metahook_api_t* api,mh_interface_t* i,mh_enginesave_t* sav
 void IPluginsV4::LoadEngine(cl_enginefunc_t* engine) {
     if (!engine) return;
     gEngfuncs=*engine;
-    settings();
     if (g_pMetaHookAPI && gEngfuncs.pfnSPR_Set && !spriteHook)
         spriteHook=g_pMetaHookAPI->InlineHook(
             reinterpret_cast<void*>(gEngfuncs.pfnSPR_Set),
