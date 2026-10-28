@@ -1,7 +1,7 @@
 name: Windows x86 Movement DLL
 on:
   push:
-    branches: [main, 'feat/**']
+    branches: [master, 'feat/**']
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -34,6 +34,33 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release create "$env:GITHUB_REF_NAME" build/Release/SvenBXTMovement.dll --repo "$env:GITHUB_REPOSITORY" --verify-tag --generate-notes
+  release-nightly:
+    name: Publish DLL to Releases
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: [windows, math-tests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: SvenBXTMovement-Windows-x86
+          path: dist
+      - name: Create or update nightly Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s dist/SvenBXTMovement.dll
+          if gh release view nightly --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload nightly dist/SvenBXTMovement.dll --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create nightly dist/SvenBXTMovement.dll \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "Movement Addon Nightly" --prerelease \
+              --notes "Automatically compiled Windows x86 DLL. Runtime behavior requires testing."
+          fi
   math-tests:
     runs-on: ubuntu-latest
     steps:
