@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include "hudedit_layout.hpp"
 
 // SvenBXTHudEdit — отдельный MetaHookSv V4-плагин.
 // Настройки палитры, замены элементов HUD, координат и спидометра.
@@ -21,6 +23,10 @@ using RedrawFn = int (*)(float, int);
 using InitFn = void (*)();
 using ViewFn = void (*)(ref_params_t*);
 using SprFn = decltype(gEngfuncs.pfnSPR_Set);
+using SprDrawFn = decltype(gEngfuncs.pfnSPR_Draw);
+using SprDrawAdditiveFn = decltype(gEngfuncs.pfnSPR_DrawAdditive);
+using SprDrawHolesFn = decltype(gEngfuncs.pfnSPR_DrawHoles);
+using TextColorFn = decltype(gEngfuncs.pfnDrawSetTextColor);
 using ScaleFn = void (*)(int*, int*, int*, int);
 
 hook_t* redrawHook = nullptr;
@@ -28,15 +34,26 @@ hook_t* initHook = nullptr;
 hook_t* viewHook = nullptr;
 hook_t* spriteHook = nullptr;
 hook_t* scaleHook = nullptr;
+hook_t* drawHook = nullptr;
+hook_t* drawAdditiveHook = nullptr;
+hook_t* drawHolesHook = nullptr;
+hook_t* textColorHook = nullptr;
 RedrawFn oldRedraw = nullptr;
 InitFn oldInit = nullptr;
 ViewFn oldView = nullptr;
 SprFn oldSprite = nullptr;
 ScaleFn oldScale = nullptr;
+SprDrawFn oldDraw = nullptr;
+SprDrawAdditiveFn oldDrawAdditive = nullptr;
+SprDrawHolesFn oldDrawHoles = nullptr;
+TextColorFn oldTextColor = nullptr;
 pfnUserMsgHook oldHealthMessage = nullptr;
 pfnUserMsgHook oldArmorMessage = nullptr;
 bool msgHooksInstalled = false;
 bool settingsRegistered = false;
+bool colorCommandRegistered = false;
+bool insideHudRedraw = false;
+int cachedScreenHeight = 0;
 
 cvar_t *active=nullptr, *r=nullptr, *g=nullptr, *b=nullptr;
 cvar_t *lowR=nullptr, *lowG=nullptr, *lowB=nullptr, *critical=nullptr;
@@ -50,6 +67,9 @@ cvar_t *speedStyle=nullptr, *speedScale=nullptr, *speedTheme=nullptr;
 cvar_t *speedR=nullptr, *speedG=nullptr, *speedB=nullptr;
 cvar_t *speedLabel=nullptr;
 cvar_t *opacity=nullptr;
+cvar_t *forceAllColors=nullptr;
+cvar_t *inventoryBottom=nullptr, *inventoryRegionX=nullptr, *inventoryRegionY=nullptr;
+cvar_t *inventoryRegionW=nullptr, *inventoryRegionH=nullptr, *inventoryMargin=nullptr;
 
 int health = -1, armor = -1;
 float speed = 0, damagedUntil = 0;
@@ -81,13 +101,14 @@ RGB mainColor() {
 }
 RGB lowColor() { return {byte(val(lowR,250)),byte(val(lowG,25)),byte(val(lowB,45))}; }
 RGB currentHealthColor() {
-    return (health >= 0 && health <= val(critical,25)) || now() < damagedUntil
+    return !yes(forceAllColors) && ((health >= 0 && health <= val(critical,25)) || now() < damagedUntil)
         ? lowColor() : mainColor();
 }
 void transform(int& red,int& green,int& blue) {
     if (!yes(active)) return;
     RGB c;
-    if (red==100 && green==130 && blue==200) c=mainColor();
+    if (yes(forceAllColors)) c=mainColor();
+    else if (red==100 && green==130 && blue==200) c=mainColor();
     else if (red==250 && green==0 && blue==0) c=lowColor();
     else return;
     red=c.r;green=c.g;blue=c.b;
@@ -99,6 +120,65 @@ void onSprite(int sprite, int red, int green, int blue) {
 void onScale(int* red,int* green,int* blue,int alpha) {
     if (red && green && blue) transform(*red,*green,*blue);
     if (oldScale) oldScale(red,green,blue,alpha);
+}
+// Text elements using the legacy engine draw API, e.g. inventory text and chapter text.
+// VGUI elements which bypass this interface cannot be recolored by this hook.
+void onTextColor(float red, float green, float blue) {
+    if (insideHudRedraw && yes(active) && yes(forceAllColors)) {
+        const RGB tint=mainColor();
+        red=tint.r/255.f; green=tint.g/255.f; blue=tint.b/255.f;
+    }
+    if (oldTextColor) oldTextColor(red,green,blue);
+}
+int inventoryY(int x,int y) {
+    const hudedit::InventoryRegion region {
+        static_cast<int>(val(inventoryRegionX,0)),
+        static_cast<int>(val(inventoryRegionY,0)),
+        static_cast<int>(val(inventoryRegionW,210)),
+        static_cast<int>(val(inventoryRegionH,170)),
+        static_cast<int>(val(inventoryMargin,12))
+    };
+    // Опциональная экспериментальная зона инвентаря, не весь HUD!
+    return hudedit::inventory_sprite_y(x,y,cachedScreenHeight,region,
+                insideHudRedraw && yes(active) && yes(inventoryBottom));
+}
+void onDraw(int frame,int x,int y,const wrect_t* rect) {
+    if (oldDraw) oldDraw(frame,x,inventoryY(x,y),rect);
+}
+void onDrawAdditive(int frame,int x,int y,const wrect_t* rect) {
+    if (oldDrawAdditive) oldDrawAdditive(frame,x,inventoryY(x,y),rect);
+}
+void onDrawHoles(int frame,int x,int y,const wrect_t* rect) {
+    if (oldDrawHoles) oldDrawHoles(frame,x,inventoryY(x,y),rect);
+}
+void changeColorCommand() {
+    if (!gEngfuncs.Cmd_Argc || !gEngfuncs.Cmd_Argv ||
+        !gEngfuncs.Cvar_SetValue || gEngfuncs.Cmd_Argc()!=4) {
+        if (gEngfuncs.Con_Printf)
+            gEngfuncs.Con_Printf("Usage: hudedit_color R G B (0..255)\n");
+        return;
+    }
+    int colors[3]={};
+    for(int i=0;i<3;++i) {
+        const char* text=gEngfuncs.Cmd_Argv(i+1);
+        if(!text || !*text) return;
+        char* end=nullptr;
+        const long n=std::strtol(text,&end,10);
+        if(end==text || *end || n<0 || n>255) {
+            if (gEngfuncs.Con_Printf)
+                gEngfuncs.Con_Printf("HUD Edit: values must be 0..255\n");
+            return;
+        }
+        colors[i]=static_cast<int>(n);
+    }
+    gEngfuncs.Cvar_SetValue("hudedit_r",static_cast<float>(colors[0]));
+    gEngfuncs.Cvar_SetValue("hudedit_g",static_cast<float>(colors[1]));
+    gEngfuncs.Cvar_SetValue("hudedit_b",static_cast<float>(colors[2]));
+    gEngfuncs.Cvar_SetValue("hudedit_speed_use_theme",1);
+    gEngfuncs.Cvar_SetValue("hudedit_all_colors",1);
+    gEngfuncs.Cvar_SetValue("hudedit_rainbow",0);
+    if(gEngfuncs.Con_Printf)
+        gEngfuncs.Con_Printf("HUD Edit: global RGB %d %d %d\n",colors[0],colors[1],colors[2]);
 }
 
 int onHealth(const char* name, int length, void* bytes) {
@@ -144,6 +224,14 @@ void settings() {
     reg(speedR,"hudedit_speed_r","255");reg(speedG,"hudedit_speed_g","255");
     reg(speedB,"hudedit_speed_b","255");reg(speedLabel,"hudedit_speed_label","0");
     reg(opacity,"hudedit_opacity","255");
+    reg(forceAllColors,"hudedit_all_colors","0");
+    // Только меню выбора предметов сверху слева, остальные элементы не двигаем.
+    reg(inventoryBottom,"hudedit_inventory_bottom","0");
+    reg(inventoryRegionX,"hudedit_inventory_region_x","0");
+    reg(inventoryRegionY,"hudedit_inventory_region_y","0");
+    reg(inventoryRegionW,"hudedit_inventory_region_w","210");
+    reg(inventoryRegionH,"hudedit_inventory_region_h","170");
+    reg(inventoryMargin,"hudedit_inventory_margin","12");
 }
 bool canDraw() {
     return yes(active) && gEngfuncs.pfnGetScreenInfo &&
@@ -261,7 +349,15 @@ void onView(ref_params_t* params) {
 }
 int onRedraw(float t,int intermission) {
     syncVisibility();
-    int result=oldRedraw?oldRedraw(t,intermission):1;
+    cachedScreenHeight=0;
+    if(gEngfuncs.pfnGetScreenInfo) {
+        SCREENINFO info={};
+        info.iSize=sizeof(info);
+        if(gEngfuncs.pfnGetScreenInfo(&info)) cachedScreenHeight=info.iHeight;
+    }
+    insideHudRedraw=!intermission;
+    const int result=oldRedraw?oldRedraw(t,intermission):1;
+    insideHudRedraw=false;
     if (!intermission) drawOverlay();
     return result;
 }
@@ -271,6 +367,10 @@ void onHudInit() {
     if(!settingsRegistered) {
         settings();
         settingsRegistered=true;
+    }
+    if(!colorCommandRegistered && gEngfuncs.pfnAddCommand) {
+        gEngfuncs.pfnAddCommand("hudedit_color",&changeColorCommand);
+        colorCommandRegistered=true;
     }
     if(!msgHooksInstalled && g_pMetaHookAPI && g_pMetaHookAPI->HookUserMsg) {
         oldHealthMessage=g_pMetaHookAPI->HookUserMsg("Health",&onHealth);
@@ -291,9 +391,16 @@ void cleanup() {
         if(viewHook)g_pMetaHookAPI->UnHook(viewHook);
         if(spriteHook)g_pMetaHookAPI->UnHook(spriteHook);
         if(scaleHook)g_pMetaHookAPI->UnHook(scaleHook);
+        if(drawHook)g_pMetaHookAPI->UnHook(drawHook);
+        if(drawAdditiveHook)g_pMetaHookAPI->UnHook(drawAdditiveHook);
+        if(drawHolesHook)g_pMetaHookAPI->UnHook(drawHolesHook);
+        if(textColorHook)g_pMetaHookAPI->UnHook(textColorHook);
     }
     redrawHook=initHook=viewHook=spriteHook=scaleHook=nullptr;
+    drawHook=drawAdditiveHook=drawHolesHook=textColorHook=nullptr;
     oldRedraw=nullptr;oldInit=nullptr;oldView=nullptr;oldSprite=nullptr;oldScale=nullptr;
+    oldDraw=nullptr;oldDrawAdditive=nullptr;oldDrawHoles=nullptr;oldTextColor=nullptr;
+    insideHudRedraw=false;cachedScreenHeight=0;
     // User-message hooks are scoped to the client DLL's lifetime; they are not
     // replaced with invalid stale function pointers after client reload.
     msgHooksInstalled=false;oldHealthMessage=oldArmorMessage=nullptr;
@@ -308,10 +415,27 @@ void IPluginsV4::Init(metahook_api_t* api,mh_interface_t* i,mh_enginesave_t* sav
 void IPluginsV4::LoadEngine(cl_enginefunc_t* engine) {
     if (!engine) return;
     gEngfuncs=*engine;
-    if (g_pMetaHookAPI && gEngfuncs.pfnSPR_Set && !spriteHook)
+    if (!g_pMetaHookAPI) return;
+    if (gEngfuncs.pfnSPR_Set && !spriteHook)
         spriteHook=g_pMetaHookAPI->InlineHook(
             reinterpret_cast<void*>(gEngfuncs.pfnSPR_Set),
             reinterpret_cast<void*>(&onSprite),reinterpret_cast<void**>(&oldSprite));
+    if (gEngfuncs.pfnSPR_Draw && !drawHook)
+        drawHook=g_pMetaHookAPI->InlineHook(
+            reinterpret_cast<void*>(gEngfuncs.pfnSPR_Draw),
+            reinterpret_cast<void*>(&onDraw),reinterpret_cast<void**>(&oldDraw));
+    if (gEngfuncs.pfnSPR_DrawAdditive && !drawAdditiveHook)
+        drawAdditiveHook=g_pMetaHookAPI->InlineHook(
+            reinterpret_cast<void*>(gEngfuncs.pfnSPR_DrawAdditive),
+            reinterpret_cast<void*>(&onDrawAdditive),reinterpret_cast<void**>(&oldDrawAdditive));
+    if (gEngfuncs.pfnSPR_DrawHoles && !drawHolesHook)
+        drawHolesHook=g_pMetaHookAPI->InlineHook(
+            reinterpret_cast<void*>(gEngfuncs.pfnSPR_DrawHoles),
+            reinterpret_cast<void*>(&onDrawHoles),reinterpret_cast<void**>(&oldDrawHoles));
+    if (gEngfuncs.pfnDrawSetTextColor && !textColorHook)
+        textColorHook=g_pMetaHookAPI->InlineHook(
+            reinterpret_cast<void*>(gEngfuncs.pfnDrawSetTextColor),
+            reinterpret_cast<void*>(&onTextColor),reinterpret_cast<void**>(&oldTextColor));
 }
 void IPluginsV4::LoadClient(cl_exportfuncs_t* exports) {
     if(!g_pMetaHookAPI||!exports) return;
