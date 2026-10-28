@@ -135,3 +135,69 @@ hudedit_inventory_region_h 170
 hudedit_inventory_margin 12
 ```
 Это **экспериментальный** вариант для Sven Co-op 5.26: у некоторых HUD инвентарь рисуется другим API, а другие иконки в той же зоне могут случайно передвигаться. Режим по умолчанию выключен и требует проверки в самой игре. Если увидишь лишние сдвиги, верни `hudedit_inventory_bottom 0` или сузь область `region_*`. В оригинальном движке меню выбора закреплено сверху; безопасного универсального callback для точного смещения только этого меню в публичном MetaHook V4 API не найдено.
+
+ 
+### Версия редактора с независимыми HUD-группами (экспериментально)
+
+**Инвентарь выбирается как единый блок**: одна пара координат, одна палитра и один флаг видимости для всех его спрайтов, текста и фонов, проходящих через стандартный GoldSrc HUD renderer. Старые `hudedit_inventory_region_*` по-прежнему определяют область исходного меню. Абсолютные координаты всего блока:
+```cfg
+hudedit_inventory_x 340
+hudedit_inventory_y 120
+hudedit_inventory_visible 1
+hudedit_inventory_use_theme 0
+hudedit_inventory_r 255
+hudedit_inventory_g 180
+hudedit_inventory_b 30
+```
+`hudedit_inventory_bottom 1` применяется только если `hudedit_inventory_y -1`; иначе ручная Y имеет приоритет. Зеркального отражения нет. Цвета слотов и рамок изменяются при прохождении через стандартные функции отрисовки.
+
+**Фонарик — отдельная группа**. Её зона первоначально выключена, поскольку на разных HUD фонарик находится в разных местах. `region_x/y/w/h` описывают исходный прямоугольник; отрицательные `region_y` задают расстояние от нижнего края.
+```cfg
+hudedit_flashlight_enabled 1
+hudedit_flashlight_region_x 0
+hudedit_flashlight_region_y -105
+hudedit_flashlight_region_w 85
+hudedit_flashlight_region_h 65
+hudedit_flashlight_x 750
+hudedit_flashlight_y 25
+hudedit_flashlight_use_theme 0
+hudedit_flashlight_r 255
+hudedit_flashlight_g 230
+hudedit_flashlight_b 80
+hudedit_flashlight_visible 1
+```
+**Название главы (например Anomalous Materials) — отдельная группа HUD-текста**:
+```cfg
+hudedit_chapter_enabled 1
+hudedit_chapter_region_x 180
+hudedit_chapter_region_y 0
+hudedit_chapter_region_w 650
+hudedit_chapter_region_h 110
+hudedit_chapter_x 250
+hudedit_chapter_y 45
+hudedit_chapter_use_theme 0
+hudedit_chapter_r 190
+hudedit_chapter_g 130
+hudedit_chapter_b 255
+hudedit_chapter_visible 1
+```
+И для инвентаря, фонарика и названия главы у всех групп доступны `hudedit_<group>_enabled`, `visible`, `x/y`, `region_x/y/w/h`, `use_theme` и `r/g/b`. Важно: такая настройка **перемещает вызовы отрисовки в выбранном прямоугольнике**, а не проверенные внутренние элементы SvEngine. Она может затронуть соседние изображения, не захватить VGUI-элементы или часть текста HUD-сообщений. По умолчанию экспериментальные группы фонарика/главы выключены. В игре 5.26 нужно проверить фактические области и, при необходимости, сузить их.
+
+Число и иконка здоровья/брони теперь также имеют собственные RGB CVars, например:
+```cfg
+hudedit_health_number_use_theme 0
+hudedit_health_number_r 255
+hudedit_health_number_g 255
+hudedit_health_number_b 255
+hudedit_health_icon_use_theme 0
+hudedit_health_icon_r 255
+hudedit_health_icon_g 80
+hudedit_health_icon_b 90
+hudedit_armor_number_use_theme 0
+hudedit_armor_number_r 120
+hudedit_armor_number_g 180
+hudedit_armor_number_b 255
+```
+Команда `hudedit_color 255 255 255` остаётся глобальным вариантом и перекрывает локальные цвета, пока `hudedit_all_colors 1`. Для локальных цветов верни `hudedit_all_colors 0`.
+
+Оба аддона собираются **независимыми** DLL и публикуются по отдельности в одном релизе. Этот режим является экспериментальным, не утверждает поддержку всех путей VGUI и требует реальной проверки на установленной Sven Co-op.

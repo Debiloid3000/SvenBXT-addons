@@ -60,6 +60,8 @@ jobs:
           ./math_tests
           c++ -std=c++17 -O2 -Wall -Wextra -pedantic -Isrc tests/hudedit_layout_tests.cpp -o hudedit_tests
           ./hudedit_tests
+          c++ -std=c++17 -O2 -Wall -Wextra -pedantic -Isrc tests/hudedit_regions_tests.cpp -o hudedit_regions_tests
+          ./hudedit_regions_tests
   nightly:
     name: Publish independent DLLs in nightly Release
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'

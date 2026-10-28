@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdlib>
 #include "hudedit_layout.hpp"
+#include "hudedit_regions.hpp"
 
 // SvenBXTHudEdit — отдельный MetaHookSv V4-плагин.
 // Настройки палитры, замены элементов HUD, координат и спидометра.
@@ -28,6 +29,8 @@ using SprDrawAdditiveFn = decltype(gEngfuncs.pfnSPR_DrawAdditive);
 using SprDrawHolesFn = decltype(gEngfuncs.pfnSPR_DrawHoles);
 using TextColorFn = decltype(gEngfuncs.pfnDrawSetTextColor);
 using ScaleFn = void (*)(int*, int*, int*, int);
+using ConsoleFn = decltype(gEngfuncs.pfnDrawConsoleString);
+using FillFn = decltype(gEngfuncs.pfnFillRGBA);
 
 hook_t* redrawHook = nullptr;
 hook_t* initHook = nullptr;
@@ -38,6 +41,8 @@ hook_t* drawHook = nullptr;
 hook_t* drawAdditiveHook = nullptr;
 hook_t* drawHolesHook = nullptr;
 hook_t* textColorHook = nullptr;
+hook_t* consoleHook=nullptr;
+hook_t* fillHook=nullptr;
 RedrawFn oldRedraw = nullptr;
 InitFn oldInit = nullptr;
 ViewFn oldView = nullptr;
@@ -47,6 +52,8 @@ SprDrawFn oldDraw = nullptr;
 SprDrawAdditiveFn oldDrawAdditive = nullptr;
 SprDrawHolesFn oldDrawHoles = nullptr;
 TextColorFn oldTextColor = nullptr;
+ConsoleFn oldConsole=nullptr;
+FillFn oldFill=nullptr;
 pfnUserMsgHook oldHealthMessage = nullptr;
 pfnUserMsgHook oldArmorMessage = nullptr;
 bool msgHooksInstalled = false;
@@ -54,6 +61,11 @@ bool settingsRegistered = false;
 bool colorCommandRegistered = false;
 bool insideHudRedraw = false;
 int cachedScreenHeight = 0;
+int cachedScreenWidth = 0;
+int currentSprite = 0;
+int spriteR=255,spriteG=255,spriteB=255;
+bool drawingCustomOverlay=false;
+float lastTextR=1.f,lastTextG=1.f,lastTextB=1.f;
 
 cvar_t *active=nullptr, *r=nullptr, *g=nullptr, *b=nullptr;
 cvar_t *lowR=nullptr, *lowG=nullptr, *lowB=nullptr, *critical=nullptr;
@@ -70,6 +82,15 @@ cvar_t *opacity=nullptr;
 cvar_t *forceAllColors=nullptr;
 cvar_t *inventoryBottom=nullptr, *inventoryRegionX=nullptr, *inventoryRegionY=nullptr;
 cvar_t *inventoryRegionW=nullptr, *inventoryRegionH=nullptr, *inventoryMargin=nullptr;
+struct HudGroup {
+    cvar_t *enabled=nullptr,*visible=nullptr,*x=nullptr,*y=nullptr,*regionX=nullptr,*regionY=nullptr,*regionW=nullptr,*regionH=nullptr;
+    cvar_t *useTheme=nullptr,*red=nullptr,*green=nullptr,*blue=nullptr;
+};
+HudGroup inventory, flashlight, chapter;
+cvar_t *healthNR=nullptr,*healthNG=nullptr,*healthNB=nullptr,*healthNTheme=nullptr;
+cvar_t *healthIR=nullptr,*healthIG=nullptr,*healthIB=nullptr,*healthITheme=nullptr;
+cvar_t *armorNR=nullptr,*armorNG=nullptr,*armorNB=nullptr,*armorNTheme=nullptr;
+cvar_t *armorIR=nullptr,*armorIG=nullptr,*armorIB=nullptr,*armorITheme=nullptr;
 
 int health = -1, armor = -1;
 float speed = 0, damagedUntil = 0;
@@ -113,7 +134,34 @@ void transform(int& red,int& green,int& blue) {
     else return;
     red=c.r;green=c.g;blue=c.b;
 }
+RGB styled(bool theme,cvar_t* red,cvar_t* green,cvar_t* blue) {
+    return theme ? mainColor() : RGB{byte(val(red,255)),byte(val(green,255)),byte(val(blue,255))};
+}
+RGB groupColor(const HudGroup& group) {
+    return styled(yes(forceAllColors)||yes(group.useTheme),group.red,group.green,group.blue);
+}
+hudedit::Region bounds(const HudGroup& group) {
+    return {static_cast<int>(val(group.regionX,0)),static_cast<int>(val(group.regionY,0)),
+            static_cast<int>(val(group.regionW,0)),static_cast<int>(val(group.regionH,0)),
+            static_cast<int>(val(group.x,-1)),static_cast<int>(val(group.y,-1)),
+            yes(group.visible),yes(group.enabled)};
+}
+const HudGroup* groupAt(int x,int y) {
+    if (!yes(active) || !insideHudRedraw || drawingCustomOverlay) return nullptr;
+    // Фонарик и текст главы имеют приоритет над зоной инвентаря.
+    for(const auto* group : {&flashlight,&chapter,&inventory}) {
+        if(hudedit::contains(bounds(*group),x,y,cachedScreenWidth,cachedScreenHeight))
+            return group;
+    }
+    return nullptr;
+}
+hudedit::Point location(const HudGroup& group,int x,int y) {
+    return hudedit::move(bounds(group),x,y,cachedScreenWidth,cachedScreenHeight,
+                    &group==&inventory && yes(inventoryBottom),
+                    static_cast<int>(val(inventoryMargin,12)));
+}
 void onSprite(int sprite, int red, int green, int blue) {
+    currentSprite=sprite;spriteR=red;spriteG=green;spriteB=blue;
     transform(red,green,blue);
     if (oldSprite) oldSprite(sprite,red,green,blue);
 }
@@ -124,32 +172,60 @@ void onScale(int* red,int* green,int* blue,int alpha) {
 // Text elements using the legacy engine draw API, e.g. inventory text and chapter text.
 // VGUI elements which bypass this interface cannot be recolored by this hook.
 void onTextColor(float red, float green, float blue) {
+    lastTextR=red;lastTextG=green;lastTextB=blue;
     if (insideHudRedraw && yes(active) && yes(forceAllColors)) {
         const RGB tint=mainColor();
         red=tint.r/255.f; green=tint.g/255.f; blue=tint.b/255.f;
     }
     if (oldTextColor) oldTextColor(red,green,blue);
 }
-int inventoryY(int x,int y) {
-    const hudedit::InventoryRegion region {
-        static_cast<int>(val(inventoryRegionX,0)),
-        static_cast<int>(val(inventoryRegionY,0)),
-        static_cast<int>(val(inventoryRegionW,210)),
-        static_cast<int>(val(inventoryRegionH,170)),
-        static_cast<int>(val(inventoryMargin,12))
-    };
-    // Опциональная экспериментальная зона инвентаря, не весь HUD!
-    return hudedit::inventory_sprite_y(x,y,cachedScreenHeight,region,
-                insideHudRedraw && yes(active) && yes(inventoryBottom));
+int onConsole(int x,int y,char* message) {
+    if(!oldConsole) return x;
+    const HudGroup* group=groupAt(x,y);
+    if(!group) return oldConsole(x,y,message);
+    if(!yes(group->visible)) return x;
+    const auto p=location(*group,x,y);
+    const RGB color=groupColor(*group);
+    if(oldTextColor) oldTextColor(color.r/255.f,color.g/255.f,color.b/255.f);
+    const int result=oldConsole(p.x,p.y,message);
+    if(oldTextColor) oldTextColor(lastTextR,lastTextG,lastTextB);
+    return result;
+}
+void onFill(int x,int y,int w,int h,int red,int green,int blue,int alpha) {
+    if(!oldFill) return;
+    const HudGroup* group=groupAt(x,y);
+    if(group) {
+        if(!yes(group->visible)) return;
+        const auto p=location(*group,x,y);x=p.x;y=p.y;
+        const RGB color=groupColor(*group);
+        red=color.r;green=color.g;blue=color.b;
+    } else {
+        transform(red,green,blue);
+    }
+    oldFill(x,y,w,h,red,green,blue,alpha);
+}
+// Treat every sprite of one HUD region as part of a single group.
+// Coordinates and color change together, not per weapon icon.
+template<typename T> void renderSprite(T draw,int frame,int x,int y,const wrect_t* rect) {
+    if(!draw) return;
+    const HudGroup* group=groupAt(x,y);
+    if(!group) {draw(frame,x,y,rect);return;}
+    if(!yes(group->visible)) return;
+    const auto p=location(*group,x,y);
+    const RGB c=groupColor(*group);
+    if(oldSprite && currentSprite) oldSprite(currentSprite,c.r,c.g,c.b);
+    draw(frame,p.x,p.y,rect);
+    int r=spriteR,g=spriteG,b=spriteB;transform(r,g,b);
+    if(oldSprite && currentSprite)oldSprite(currentSprite,r,g,b);
 }
 void onDraw(int frame,int x,int y,const wrect_t* rect) {
-    if (oldDraw) oldDraw(frame,x,inventoryY(x,y),rect);
+    renderSprite(oldDraw,frame,x,y,rect);
 }
 void onDrawAdditive(int frame,int x,int y,const wrect_t* rect) {
-    if (oldDrawAdditive) oldDrawAdditive(frame,x,inventoryY(x,y),rect);
+    renderSprite(oldDrawAdditive,frame,x,y,rect);
 }
 void onDrawHoles(int frame,int x,int y,const wrect_t* rect) {
-    if (oldDrawHoles) oldDrawHoles(frame,x,inventoryY(x,y),rect);
+    renderSprite(oldDrawHoles,frame,x,y,rect);
 }
 void changeColorCommand() {
     if (!gEngfuncs.Cmd_Argc || !gEngfuncs.Cmd_Argv ||
@@ -202,6 +278,22 @@ void reg(cvar_t*& dest,const char* name,const char* value) {
     if (gEngfuncs.pfnRegisterVariable)
         dest=gEngfuncs.pfnRegisterVariable(name,value,FCVAR_ARCHIVE);
 }
+void registerGroup(HudGroup& group,const char* key,bool defaultEnabled,
+                   const char* left,const char* top,const char* width,const char* height) {
+    // CVar names are stable and independent per block; use normal archived CVars.
+    char name[96];
+    auto make=[&](cvar_t*& ptr,const char* suffix,const char* value) {
+        std::snprintf(name,sizeof(name),"hudedit_%s_%s",key,suffix);
+        reg(ptr,name,value);
+    };
+    make(group.enabled,"enabled",defaultEnabled?"1":"0");
+    make(group.visible,"visible","1");
+    make(group.x,"x","-1");make(group.y,"y","-1");
+    make(group.regionX,"region_x",left);make(group.regionY,"region_y",top);
+    make(group.regionW,"region_w",width);make(group.regionH,"region_h",height);
+    make(group.useTheme,"use_theme","1");
+    make(group.red,"r","255");make(group.green,"g","255");make(group.blue,"b","255");
+}
 void settings() {
     reg(active,"hudedit_enabled","1");
     reg(r,"hudedit_r","100"); reg(g,"hudedit_g","130"); reg(b,"hudedit_b","200");
@@ -232,6 +324,27 @@ void settings() {
     reg(inventoryRegionW,"hudedit_inventory_region_w","210");
     reg(inventoryRegionH,"hudedit_inventory_region_h","170");
     reg(inventoryMargin,"hudedit_inventory_margin","12");
+    registerGroup(inventory,"inventory",true,"0","0","210","170");
+    // Flashlight and chapter text are not always rendered through GoldSrc draw APIs.
+    // Opt-in regions avoid accidentally catching HP/ammo/other map titles.
+    registerGroup(flashlight,"flashlight",false,"0","-105","85","65");
+    registerGroup(chapter,"chapter",false,"180","0","650","110");
+    reg(healthNTheme,"hudedit_health_number_use_theme","1");
+    reg(healthNR,"hudedit_health_number_r","255");
+    reg(healthNG,"hudedit_health_number_g","255");
+    reg(healthNB,"hudedit_health_number_b","255");
+    reg(healthITheme,"hudedit_health_icon_use_theme","1");
+    reg(healthIR,"hudedit_health_icon_r","255");
+    reg(healthIG,"hudedit_health_icon_g","255");
+    reg(healthIB,"hudedit_health_icon_b","255");
+    reg(armorNTheme,"hudedit_armor_number_use_theme","1");
+    reg(armorNR,"hudedit_armor_number_r","255");
+    reg(armorNG,"hudedit_armor_number_g","255");
+    reg(armorNB,"hudedit_armor_number_b","255");
+    reg(armorITheme,"hudedit_armor_icon_use_theme","1");
+    reg(armorIR,"hudedit_armor_icon_r","255");
+    reg(armorIG,"hudedit_armor_icon_g","255");
+    reg(armorIB,"hudedit_armor_icon_b","255");
 }
 bool canDraw() {
     return yes(active) && gEngfuncs.pfnGetScreenInfo &&
@@ -320,18 +433,23 @@ void drawOverlay() {
     SCREENINFO screen={};
     screen.iSize=sizeof(screen);
     if (!gEngfuncs.pfnGetScreenInfo(&screen)||screen.iWidth<=0||screen.iHeight<=0) return;
+    drawingCustomOverlay=true;
     const RGB theme=mainColor();
     const int scale=std::max(1,std::min(5,static_cast<int>(val(speedScale,2))));
     if (yes(healthCustom) && health>=0) {
+        const bool danger=health <= val(critical,25) || now()<damagedUntil;
+        const RGB numberColor=danger && !yes(forceAllColors)?lowColor():styled(yes(forceAllColors)||yes(healthNTheme),healthNR,healthNG,healthNB);
+        const RGB iconColor=danger && !yes(forceAllColors)?lowColor():styled(yes(forceAllColors)||yes(healthITheme),healthIR,healthIG,healthIB);
         if(yes(healthNumber))number(coord(healthNX,65),coord(healthNY,screen.iHeight-60),
-                                   health,currentHealthColor(),true,2);
+                                   health,numberColor,true,2);
         if(yes(healthIcon))plusIcon(coord(healthIX,25),coord(healthIY,screen.iHeight-55),
-                                   currentHealthColor());
+                                   iconColor);
     }
     if (yes(armorCustom) && armor>=0) {
         if(yes(armorNumber))number(coord(armorNX,205),coord(armorNY,screen.iHeight-60),
-                                  armor,theme,true,2);
-        if(yes(armorIcon))shieldIcon(coord(armorIX,165),coord(armorIY,screen.iHeight-55),theme);
+                                  armor,styled(yes(forceAllColors)||yes(armorNTheme),armorNR,armorNG,armorNB),true,2);
+        if(yes(armorIcon))shieldIcon(coord(armorIX,165),coord(armorIY,screen.iHeight-55),
+                                   styled(yes(forceAllColors)||yes(armorITheme),armorIR,armorIG,armorIB));
     }
     if(yes(speedEnable)) {
         const int x=coord(speedX,screen.iWidth/2-22);
@@ -342,6 +460,7 @@ void drawOverlay() {
                val(speedStyle,1)>=.5f,scale);
         if(yes(speedLabel))consoleText(x,y+scale*9,"u/s",speedColor);
     }
+    drawingCustomOverlay=false;
 }
 void onView(ref_params_t* params) {
     if (oldView) oldView(params);
@@ -353,7 +472,9 @@ int onRedraw(float t,int intermission) {
     if(gEngfuncs.pfnGetScreenInfo) {
         SCREENINFO info={};
         info.iSize=sizeof(info);
-        if(gEngfuncs.pfnGetScreenInfo(&info)) cachedScreenHeight=info.iHeight;
+        if(gEngfuncs.pfnGetScreenInfo(&info)) {
+            cachedScreenHeight=info.iHeight;cachedScreenWidth=info.iWidth;
+        }
     }
     insideHudRedraw=!intermission;
     const int result=oldRedraw?oldRedraw(t,intermission):1;
@@ -395,12 +516,16 @@ void cleanup() {
         if(drawAdditiveHook)g_pMetaHookAPI->UnHook(drawAdditiveHook);
         if(drawHolesHook)g_pMetaHookAPI->UnHook(drawHolesHook);
         if(textColorHook)g_pMetaHookAPI->UnHook(textColorHook);
+        if(consoleHook)g_pMetaHookAPI->UnHook(consoleHook);
+        if(fillHook)g_pMetaHookAPI->UnHook(fillHook);
     }
     redrawHook=initHook=viewHook=spriteHook=scaleHook=nullptr;
     drawHook=drawAdditiveHook=drawHolesHook=textColorHook=nullptr;
+    consoleHook=fillHook=nullptr;
     oldRedraw=nullptr;oldInit=nullptr;oldView=nullptr;oldSprite=nullptr;oldScale=nullptr;
     oldDraw=nullptr;oldDrawAdditive=nullptr;oldDrawHoles=nullptr;oldTextColor=nullptr;
-    insideHudRedraw=false;cachedScreenHeight=0;
+    oldConsole=nullptr;oldFill=nullptr;
+    insideHudRedraw=false;drawingCustomOverlay=false;cachedScreenHeight=cachedScreenWidth=0;
     // User-message hooks are scoped to the client DLL's lifetime; they are not
     // replaced with invalid stale function pointers after client reload.
     msgHooksInstalled=false;oldHealthMessage=oldArmorMessage=nullptr;
@@ -436,6 +561,14 @@ void IPluginsV4::LoadEngine(cl_enginefunc_t* engine) {
         textColorHook=g_pMetaHookAPI->InlineHook(
             reinterpret_cast<void*>(gEngfuncs.pfnDrawSetTextColor),
             reinterpret_cast<void*>(&onTextColor),reinterpret_cast<void**>(&oldTextColor));
+    if (gEngfuncs.pfnDrawConsoleString && !consoleHook)
+        consoleHook=g_pMetaHookAPI->InlineHook(
+            reinterpret_cast<void*>(gEngfuncs.pfnDrawConsoleString),
+            reinterpret_cast<void*>(&onConsole),reinterpret_cast<void**>(&oldConsole));
+    if (gEngfuncs.pfnFillRGBA && !fillHook)
+        fillHook=g_pMetaHookAPI->InlineHook(
+            reinterpret_cast<void*>(gEngfuncs.pfnFillRGBA),
+            reinterpret_cast<void*>(&onFill),reinterpret_cast<void**>(&oldFill));
 }
 void IPluginsV4::LoadClient(cl_exportfuncs_t* exports) {
     if(!g_pMetaHookAPI||!exports) return;
