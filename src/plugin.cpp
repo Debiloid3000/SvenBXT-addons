@@ -14,6 +14,7 @@
 // Самостоятельный MetaHookSv V4 плагин. Никаких невалидированных адресов PM_PlayerMove.
 // HUD_PlayerMove — безопасный клиентский вход с playermove_t*, который вызывает PM_Move.
 // Предсказание на два тика приблизительно: трассировка + гравитация, а не копия PM_Move.
+// SvEngine использует playermove_10152_t с массивами MAX_PHYSENTS=1024.
 
 metahook_api_t* g_pMetaHookAPI = nullptr;
 mh_interface_t* g_pInterface = nullptr;
@@ -100,7 +101,8 @@ struct Forecast {
 };
 class Predictor {
 public:
-    Forecast twoTicks(const playermove_t& pm) const {
+    template <typename PM>
+    Forecast twoTicks(const PM& pm) const {
         Forecast out{};
         out.pos = {pm.origin[0], pm.origin[1], pm.origin[2]};
         out.vel = {pm.velocity[0], pm.velocity[1], pm.velocity[2]};
@@ -139,7 +141,8 @@ class MovementAddon {
     float speed = 0;
     float fpsHint = 0;
 public:
-    void before(playermove_t* pm, int server) {
+    template <typename PM>
+    void before(PM* pm, int server) {
         if (!pm || server || pm->server || pm->dead || pm->spectator ||
             !pm->movevars || pm->frametime <= 0 || pm->frametime > .2f) return;
         Vec3 vel(pm->velocity[0], pm->velocity[1], pm->velocity[2]);
@@ -165,7 +168,8 @@ public:
         if (air && f.ground && pm->runfuncs)
             notifications.add("LANDING", "Ground within ~2 ticks");
     }
-    void after(const playermove_t* pm, int server) {
+    template <typename PM>
+    void after(const PM* pm, int server) {
         if (!pm || server || pm->server) return;
         // Только после вызова оригинальной HUD_PlayerMove глобальный контекст
         // pmove принадлежит корректному кадру, и можно безопаснее трассировать.
@@ -182,7 +186,8 @@ public:
 
 private:
     void resetFrame() { edgeLatch = jumpLatch = false; }
-    void edge(playermove_t& pm, const Forecast& f, bool assist) {
+    template <typename PM>
+    void edge(PM& pm, const Forecast& f, bool assist) {
         // Это НЕ точное предсказание edgebug, а детектор нужного окна.
         bool candidate = enabled(edgeEnabled) && pm.velocity[2] < -180.f &&
                          f.wall && !f.ground && f.fraction < .99f;
@@ -192,7 +197,8 @@ private:
         }
         edgeLatch = candidate;
     }
-    void jumpbug(playermove_t& pm, const Forecast& f, bool assist) {
+    template <typename PM>
+    void jumpbug(PM& pm, const Forecast& f, bool assist) {
         bool candidate = enabled(jumpEnabled) && pm.velocity[2] < -180.f &&
                          f.ground && f.normalZ > .7f;
         if (candidate && !jumpLatch) {
@@ -204,7 +210,8 @@ private:
         }
         jumpLatch = candidate;
     }
-    void vectorStrafe(playermove_t& pm, Vec3 v, bool assist) {
+    template <typename PM>
+    void vectorStrafe(PM& pm, Vec3 v, bool assist) {
         if (!enabled(strafeEnabled) || !assist || v.speed2d() < 10.f) return;
         float wish = clampf(pm.maxspeed, 1.f, 400.f);
         float ideal = ideal_strafe_angle(wish, pm.movevars->airaccelerate,
@@ -217,13 +224,15 @@ private:
         pm.cmd.sidemove = wish * std::sin(target - yaw);
         // Взгляд/углы камеры не меняем.
     }
-    void objectBoost(const playermove_t& pm) {
+    template <typename PM>
+    void objectBoost(const PM& pm) {
         bool touched = false;
         if (enabled(boostEnabled)) {
-            int count = std::max(0, std::min(pm.numtouch, MAX_PHYSENTS));
+            const int maxPhys = static_cast<int>(sizeof(pm.physents) / sizeof(pm.physents[0]));
+            int count = std::max(0, std::min(pm.numtouch, maxPhys));
             for (int i = 0; i < count; ++i) {
                 int index = pm.touchindex[i].ent;
-                if (index < 0 || index >= pm.numphysent || index >= MAX_PHYSENTS)
+                if (index < 0 || index >= pm.numphysent || index >= maxPhys)
                     continue;
                 const physent_t& entity = pm.physents[index];
                 if (std::strncmp(entity.name, "func_pushable", sizeof(entity.name)) == 0) {
@@ -254,9 +263,16 @@ private:
 MovementAddon addon;
 
 void onMove(playermove_t* pm, int server) {
-    addon.before(pm, server);
+    if (!pm) { if (originalMovement) originalMovement(pm, server); return; }
+    // В 5.26 physents/visents/touchindex содержат по 1024 элемента;
+    // обычная 600-element HL структура НЕ совместима с SvEngine.
+    const bool sven = g_pMetaHookAPI && g_pMetaHookAPI->GetEngineType &&
+                      g_pMetaHookAPI->GetEngineType() == ENGINE_SVENGINE;
+    if (sven) addon.before(reinterpret_cast<playermove_10152_t*>(pm), server);
+    else addon.before(pm, server);
     if (originalMovement) originalMovement(pm, server);
-    addon.after(pm, server);
+    if (sven) addon.after(reinterpret_cast<playermove_10152_t*>(pm), server);
+    else addon.after(pm, server);
 }
 int onRedraw(float t, int intermission) {
     int result = originalRedraw ? originalRedraw(t, intermission) : 1;
