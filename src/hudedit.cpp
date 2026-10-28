@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include "hudedit_layout.hpp"
 #include "hudedit_regions.hpp"
+void HudEditOptions_Register();
+void HudEditOptions_Unregister();
 
 // SvenBXTHudEdit — отдельный MetaHookSv V4-плагин.
 // Настройки палитры, замены элементов HUD, координат и спидометра.
@@ -569,6 +571,7 @@ void onHudInit() {
     }
 }
 void cleanup() {
+    HudEditOptions_Unregister();
     restoreSettings();
     // При выгрузке DLL нельзя оставлять указатели usermsg-хуков в нашей памяти.
     if (msgHooksInstalled && g_pMetaHookAPI && g_pMetaHookAPI->HookUserMsg) {
@@ -619,6 +622,7 @@ void IPluginsV4::LoadEngine(cl_enginefunc_t* engine) {
         gEngfuncs.pfnAddCommand("hudedit_color",&changeColorCommand);
         colorCommandRegistered=true;
     }
+    HudEditOptions_Register();
     if (!g_pMetaHookAPI) return;
     if (gEngfuncs.pfnSPR_Set && !spriteHook)
         spriteHook=g_pMetaHookAPI->InlineHook(
@@ -650,6 +654,7 @@ void IPluginsV4::LoadEngine(cl_enginefunc_t* engine) {
             reinterpret_cast<void*>(&onFill),reinterpret_cast<void**>(&oldFill));
 }
 void IPluginsV4::LoadClient(cl_exportfuncs_t* exports) {
+    HudEditOptions_Register();
     if(!g_pMetaHookAPI||!exports) return;
     if(exports->HUD_Init && !initHook)
         initHook=g_pMetaHookAPI->InlineHook(
