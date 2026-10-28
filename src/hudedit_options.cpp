@@ -10,6 +10,7 @@
 #include <vgui_controls/Controls.h>
 #include <algorithm>
 #include <array>
+#include <vector>
 #include <string>
 #include <cstdio>
 
@@ -84,8 +85,6 @@ public:
             surface->DrawFilledRect(cx-1,cy-1,cx+2,cy+2);
     }
 private:
-    std::array<CCvarTextEntry*,7> entryStorage{};
-    std::array<CCvarToggleCheckButton*,8> checkStorage{};
     std::vector<CCvarTextEntry*> entries;
     std::vector<CCvarToggleCheckButton*> checks;
     void addInput(const char* label,const char* cvar,int x,int y) {
