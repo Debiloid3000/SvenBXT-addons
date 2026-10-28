@@ -8,8 +8,9 @@
 #include <cstdlib>
 #include "hudedit_layout.hpp"
 #include "hudedit_regions.hpp"
-void HudEditOptions_Register();
-void HudEditOptions_Unregister();
+#include "startup_diagnostics.hpp"
+// VGUI Options frontend remains in the repository as experimental source,
+// but is not linked into the safe startup DLL until its runtime is validated.
 
 // SvenBXTHudEdit — отдельный MetaHookSv V4-плагин.
 // Настройки палитры, замены элементов HUD, координат и спидометра.
@@ -61,6 +62,13 @@ pfnUserMsgHook oldArmorMessage = nullptr;
 bool msgHooksInstalled = false;
 bool settingsRegistered = false;
 bool colorCommandRegistered = false;
+bool safeCommandsRegistered = false;
+bool hudSessionActive=false;
+bool nativeHooksEnabled=false;
+cl_exportfuncs_t* pendingExports=nullptr;
+using ShutdownFn=void (*)();
+ShutdownFn originalShutdown=nullptr;
+bool wasEverActivated=false;
 bool insideHudRedraw = false;
 int cachedScreenHeight = 0;
 int cachedScreenWidth = 0;
@@ -308,7 +316,7 @@ void registerGroup(HudGroup& group,const char* key,bool defaultEnabled,
 void settings() {
     reg(active,"hudedit_enabled","1");
     cvar_t* version=nullptr;
-    reg(version,"hudedit_version","2.0.0");
+    reg(version,"hudedit_version","2.1.0");
     reg(r,"hudedit_r","100"); reg(g,"hudedit_g","130"); reg(b,"hudedit_b","200");
     reg(lowR,"hudedit_critical_r","250");reg(lowG,"hudedit_critical_g","25");
     reg(lowB,"hudedit_critical_b","45");reg(critical,"hudedit_critical_hp","25");
@@ -571,7 +579,7 @@ void onHudInit() {
     }
 }
 void cleanup() {
-    HudEditOptions_Unregister();
+    addon_log::write("hudedit","cleanup");
     restoreSettings();
     // При выгрузке DLL нельзя оставлять указатели usermsg-хуков в нашей памяти.
     if (msgHooksInstalled && g_pMetaHookAPI && g_pMetaHookAPI->HookUserMsg) {
@@ -601,19 +609,132 @@ void cleanup() {
     // User-message hooks are scoped to the client DLL's lifetime; they are not
     // replaced with invalid stale function pointers after client reload.
     msgHooksInstalled=false;oldHealthMessage=oldArmorMessage=nullptr;
-    settingsRegistered=false;
+    // The engine still owns the registered CVars/commands on level transitions.
+    // Do not re-register them on the same host instance.
     health=armor=-1;speed=0;
+}
+} // namespace
+
+
+namespace {
+void onClientShutdown();
+void stopHud() {
+    addon_log::write("hudedit","hudedit_stop requested");
+    if(hudSessionActive && pendingExports) {
+        if(pendingExports->HUD_Redraw==&onRedraw)
+            pendingExports->HUD_Redraw=oldRedraw;
+        if(pendingExports->V_CalcRefdef==&onView)
+            pendingExports->V_CalcRefdef=oldView;
+        if(pendingExports->HUD_Shutdown==&onClientShutdown)
+            pendingExports->HUD_Shutdown=originalShutdown;
+    }
+    hudSessionActive=false;
+    cleanup();
+    originalShutdown=nullptr;
+}
+void onClientShutdown() {
+    addon_log::write("hudedit","client HUD_Shutdown");
+    ShutdownFn saved=originalShutdown;
+    stopHud();
+    pendingExports=nullptr;
+    if(saved) saved();
+}
+void startHud() {
+    addon_log::write("hudedit","hudedit_start requested");
+    if(hudSessionActive) return;
+    if(!pendingExports) {
+        addon_log::write("hudedit","start rejected: LoadClient not ready");
+        return;
+    }
+    auto* exp=pendingExports;
+    if(!exp->HUD_Redraw || !exp->V_CalcRefdef || !exp->HUD_Shutdown) {
+        addon_log::write("hudedit","start rejected: missing client export");
+        return;
+    }
+    oldRedraw=exp->HUD_Redraw;
+    oldView=exp->V_CalcRefdef;
+    originalShutdown=exp->HUD_Shutdown;
+    if(oldRedraw==&onRedraw || oldView==&onView ||
+       originalShutdown==&onClientShutdown) {
+        addon_log::write("hudedit","start rejected: recursive callback");
+        oldRedraw=nullptr;oldView=nullptr;originalShutdown=nullptr;
+        return;
+    }
+    // Both callback pointers are replaced only AFTER game startup.
+    exp->HUD_Redraw=&onRedraw;
+    exp->V_CalcRefdef=&onView;
+    exp->HUD_Shutdown=&onClientShutdown;
+    hudSessionActive=true;
+    wasEverActivated=true;
+    // Existing usermessage callbacks may be registered by this time.
+    if(!msgHooksInstalled && g_pMetaHookAPI && g_pMetaHookAPI->HookUserMsg) {
+        oldHealthMessage=g_pMetaHookAPI->HookUserMsg("Health",&onHealth);
+        oldArmorMessage=g_pMetaHookAPI->HookUserMsg("Battery",&onArmor);
+        msgHooksInstalled=true;
+    }
+    addon_log::write("hudedit","hudedit_start client callbacks attached");
+}
+void enableNativeHooks() {
+    addon_log::write("hudedit","hudedit_native_on requested");
+    if(nativeHooksEnabled || !hudSessionActive || !g_pMetaHookAPI) {
+        addon_log::write("hudedit","native hooks not activated: call hudedit_start first");
+        return;
+    }
+    if(gEngfuncs.pfnSPR_Set)
+        spriteHook=g_pMetaHookAPI->InlineHook(
+            reinterpret_cast<void*>(gEngfuncs.pfnSPR_Set),
+            reinterpret_cast<void*>(&onSprite),reinterpret_cast<void**>(&oldSprite));
+    if(gEngfuncs.pfnSPR_Draw)
+        drawHook=g_pMetaHookAPI->InlineHook(
+            reinterpret_cast<void*>(gEngfuncs.pfnSPR_Draw),
+            reinterpret_cast<void*>(&onDraw),reinterpret_cast<void**>(&oldDraw));
+    if(gEngfuncs.pfnSPR_DrawAdditive)
+        drawAdditiveHook=g_pMetaHookAPI->InlineHook(
+            reinterpret_cast<void*>(gEngfuncs.pfnSPR_DrawAdditive),
+            reinterpret_cast<void*>(&onDrawAdditive),reinterpret_cast<void**>(&oldDrawAdditive));
+    if(gEngfuncs.pfnSPR_DrawHoles)
+        drawHolesHook=g_pMetaHookAPI->InlineHook(
+            reinterpret_cast<void*>(gEngfuncs.pfnSPR_DrawHoles),
+            reinterpret_cast<void*>(&onDrawHoles),reinterpret_cast<void**>(&oldDrawHoles));
+    if(gEngfuncs.pfnDrawSetTextColor)
+        textColorHook=g_pMetaHookAPI->InlineHook(
+            reinterpret_cast<void*>(gEngfuncs.pfnDrawSetTextColor),
+            reinterpret_cast<void*>(&onTextColor),reinterpret_cast<void**>(&oldTextColor));
+    if(gEngfuncs.pfnDrawConsoleString)
+        consoleHook=g_pMetaHookAPI->InlineHook(
+            reinterpret_cast<void*>(gEngfuncs.pfnDrawConsoleString),
+            reinterpret_cast<void*>(&onConsole),reinterpret_cast<void**>(&oldConsole));
+    if(gEngfuncs.pfnFillRGBA)
+        fillHook=g_pMetaHookAPI->InlineHook(
+            reinterpret_cast<void*>(gEngfuncs.pfnFillRGBA),
+            reinterpret_cast<void*>(&onFill),reinterpret_cast<void**>(&oldFill));
+    nativeHooksEnabled=bool(spriteHook||drawHook||drawAdditiveHook||
+        drawHolesHook||textColorHook||consoleHook||fillHook);
+    addon_log::write("hudedit",nativeHooksEnabled?
+        "native hooks installed (experimental)":"native hooks unavailable");
+}
+void disableNativeHooks() {
+    addon_log::write("hudedit","hudedit_native_off requested");
+    if(!g_pMetaHookAPI) return;
+    for(hook_t* h : {spriteHook,drawHook,drawAdditiveHook,drawHolesHook,
+                    textColorHook,consoleHook,fillHook}) {
+        if(h) g_pMetaHookAPI->UnHook(h);
+    }
+    spriteHook=drawHook=drawAdditiveHook=drawHolesHook=textColorHook=consoleHook=fillHook=nullptr;
+    oldSprite=nullptr;oldDraw=nullptr;oldDrawAdditive=nullptr;
+    oldDrawHoles=nullptr;oldTextColor=nullptr;oldConsole=nullptr;oldFill=nullptr;
+    nativeHooksEnabled=false;
 }
 } // namespace
 
 void IPluginsV4::Init(metahook_api_t* api,mh_interface_t* i,mh_enginesave_t* save) {
     g_pMetaHookAPI=api;g_pInterface=i;g_pMetaSave=save;
+    addon_log::write("hudedit","V4 Init");
 }
 void IPluginsV4::LoadEngine(cl_enginefunc_t* engine) {
-    if (!engine) return;
+    if(!engine) return;
     gEngfuncs=*engine;
-    // HUD_Init может быть пропущен ранней загрузкой MetaHook.
-    // Регистрация в LoadEngine гарантирует наличие CVars до первого кадра.
+    addon_log::write("hudedit","LoadEngine begin");
     if(!settingsRegistered && gEngfuncs.pfnRegisterVariable) {
         settings();
         settingsRegistered=true;
@@ -622,65 +743,30 @@ void IPluginsV4::LoadEngine(cl_enginefunc_t* engine) {
         gEngfuncs.pfnAddCommand("hudedit_color",&changeColorCommand);
         colorCommandRegistered=true;
     }
-    HudEditOptions_Register();
-    if (!g_pMetaHookAPI) return;
-    if (gEngfuncs.pfnSPR_Set && !spriteHook)
-        spriteHook=g_pMetaHookAPI->InlineHook(
-            reinterpret_cast<void*>(gEngfuncs.pfnSPR_Set),
-            reinterpret_cast<void*>(&onSprite),reinterpret_cast<void**>(&oldSprite));
-    if (gEngfuncs.pfnSPR_Draw && !drawHook)
-        drawHook=g_pMetaHookAPI->InlineHook(
-            reinterpret_cast<void*>(gEngfuncs.pfnSPR_Draw),
-            reinterpret_cast<void*>(&onDraw),reinterpret_cast<void**>(&oldDraw));
-    if (gEngfuncs.pfnSPR_DrawAdditive && !drawAdditiveHook)
-        drawAdditiveHook=g_pMetaHookAPI->InlineHook(
-            reinterpret_cast<void*>(gEngfuncs.pfnSPR_DrawAdditive),
-            reinterpret_cast<void*>(&onDrawAdditive),reinterpret_cast<void**>(&oldDrawAdditive));
-    if (gEngfuncs.pfnSPR_DrawHoles && !drawHolesHook)
-        drawHolesHook=g_pMetaHookAPI->InlineHook(
-            reinterpret_cast<void*>(gEngfuncs.pfnSPR_DrawHoles),
-            reinterpret_cast<void*>(&onDrawHoles),reinterpret_cast<void**>(&oldDrawHoles));
-    if (gEngfuncs.pfnDrawSetTextColor && !textColorHook)
-        textColorHook=g_pMetaHookAPI->InlineHook(
-            reinterpret_cast<void*>(gEngfuncs.pfnDrawSetTextColor),
-            reinterpret_cast<void*>(&onTextColor),reinterpret_cast<void**>(&oldTextColor));
-    if (gEngfuncs.pfnDrawConsoleString && !consoleHook)
-        consoleHook=g_pMetaHookAPI->InlineHook(
-            reinterpret_cast<void*>(gEngfuncs.pfnDrawConsoleString),
-            reinterpret_cast<void*>(&onConsole),reinterpret_cast<void**>(&oldConsole));
-    if (gEngfuncs.pfnFillRGBA && !fillHook)
-        fillHook=g_pMetaHookAPI->InlineHook(
-            reinterpret_cast<void*>(gEngfuncs.pfnFillRGBA),
-            reinterpret_cast<void*>(&onFill),reinterpret_cast<void**>(&oldFill));
+    if(!safeCommandsRegistered && gEngfuncs.pfnAddCommand) {
+        gEngfuncs.pfnAddCommand("hudedit_start",&startHud);
+        gEngfuncs.pfnAddCommand("hudedit_stop",&stopHud);
+        gEngfuncs.pfnAddCommand("hudedit_native_on",&enableNativeHooks);
+        gEngfuncs.pfnAddCommand("hudedit_native_off",&disableNativeHooks);
+        safeCommandsRegistered=true;
+    }
+    addon_log::write("hudedit","LoadEngine completed (passive)");
 }
 void IPluginsV4::LoadClient(cl_exportfuncs_t* exports) {
-    HudEditOptions_Register();
-    if(!g_pMetaHookAPI||!exports) return;
-    if(exports->HUD_Init && !initHook)
-        initHook=g_pMetaHookAPI->InlineHook(
-            reinterpret_cast<void*>(exports->HUD_Init),
-            reinterpret_cast<void*>(&onHudInit),reinterpret_cast<void**>(&oldInit));
-    if(exports->HUD_Redraw && !redrawHook)
-        redrawHook=g_pMetaHookAPI->InlineHook(
-            reinterpret_cast<void*>(exports->HUD_Redraw),
-            reinterpret_cast<void*>(&onRedraw),reinterpret_cast<void**>(&oldRedraw));
-    if(exports->V_CalcRefdef && !viewHook)
-        viewHook=g_pMetaHookAPI->InlineHook(
-            reinterpret_cast<void*>(exports->V_CalcRefdef),
-            reinterpret_cast<void*>(&onView),reinterpret_cast<void**>(&oldView));
-
-    // Современный MetaHook: использует символ из gamedata, без старых x86 offsets.
-    if(!scaleHook && g_pMetaHookAPI->ResolveGameSymbol && g_pMetaHookAPI->GetClientBase) {
-        void* target=nullptr;
-        const auto status=g_pMetaHookAPI->ResolveGameSymbol(
-            g_pMetaHookAPI->GetClientBase(),"R_ScaleColor",
-            MH_GAMESYMBOL_KIND_FUNCTION,&target);
-        if(status==MH_GAMESYMBOL_OK && target)
-            scaleHook=g_pMetaHookAPI->InlineHook(target,reinterpret_cast<void*>(&onScale),
-                                                reinterpret_cast<void**>(&oldScale));
-    }
+    pendingExports=exports;
+    addon_log::write("hudedit","LoadClient (no automatic hooks)");
 }
-void IPluginsV4::ExitGame(int) { cleanup(); }
-void IPluginsV4::Shutdown() { cleanup(); }
-const char* IPluginsV4::GetVersion() { return "0.1.0"; }
+void IPluginsV4::ExitGame(int) {
+    addon_log::write("hudedit","V4 ExitGame");
+    // The HUD_Shutdown callback normally performs the safe restore.
+    // Do not dereference a potentially unloaded client export table here.
+    cleanup();
+    pendingExports=nullptr;hudSessionActive=false;
+}
+void IPluginsV4::Shutdown() {
+    addon_log::write("hudedit","V4 Shutdown");
+    cleanup();
+    pendingExports=nullptr;hudSessionActive=false;
+}
+const char* IPluginsV4::GetVersion() { return "2.1.0-safe"; }
 EXPOSE_SINGLE_INTERFACE(IPluginsV4,IPluginsV4,METAHOOK_PLUGIN_API_VERSION_V4);
