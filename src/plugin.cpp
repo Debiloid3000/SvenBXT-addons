@@ -130,6 +130,8 @@ public:
 
 class MovementAddon {
     Predictor predictor;
+    Forecast previousForecast{};
+    bool haveForecast = false;
     bool edgeLatch = false;
     bool jumpLatch = false;
     bool fpsLimited = false;
@@ -145,7 +147,9 @@ public:
         fpsHint = enabled(triggerWidth) ?
             trigger_skip_fps(speed, triggerWidth->value) : 0;
         if (!mode || mode->value < .5f) { resetFrame(); return; }
-        const Forecast f = predictor.twoTicks(*pm);
+        // Используем прогноз предыдущего кадра: нельзя вызывать PM_PlayerTrace
+        // до того, как игровая PM_Move инициализирует внутренний pmove.
+        const Forecast f = haveForecast ? previousForecast : Forecast{};
         const bool air = pm->onground == -1 && pm->waterlevel <= 1;
         const bool assist = mode->value >= 1.5f &&
                              (!pm->multiplayer || enabled(online));
@@ -163,10 +167,18 @@ public:
     }
     void after(const playermove_t* pm, int server) {
         if (!pm || server || pm->server) return;
+        // Только после вызова оригинальной HUD_PlayerMove глобальный контекст
+        // pmove принадлежит корректному кадру, и можно безопаснее трассировать.
+        if (pm->movevars && pm->PM_PlayerTrace && pm->frametime > 0 && !pm->dead) {
+            previousForecast = predictor.twoTicks(*pm);
+            haveForecast = true;
+        } else {
+            haveForecast = false;
+        }
         objectBoost(*pm);
     }
     void draw() const { notifications.draw(speed, fpsHint); }
-    void shutdown() { restoreFps(); resetFrame(); speed = fpsHint = 0; }
+    void shutdown() { restoreFps(); resetFrame(); haveForecast = false; speed = fpsHint = 0; }
 
 private:
     void resetFrame() { edgeLatch = jumpLatch = false; }
