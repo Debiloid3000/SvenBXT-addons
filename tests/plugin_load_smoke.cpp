@@ -26,6 +26,10 @@ int cmd(const char* name,void(*fn)()) {
     if(name&&fn) commands[name]=fn;
     return 1;
 }
+cvar_t* lookup(const char* name) {
+    auto it=vars.find(name?name:"");
+    return it==vars.end()?nullptr:&it->second;
+}
 }
 using Factory=void* (__cdecl*)(const char*,int*);
 int main(int argc,char** argv) {
@@ -48,6 +52,7 @@ int main(int argc,char** argv) {
         cl_enginefunc_t engine={};
         engine.pfnRegisterVariable=&reg;
         engine.pfnAddCommand=&cmd;
+        engine.pfnGetCvarPointer=&lookup;
         p->Init(nullptr,nullptr,nullptr);
         p->LoadEngine(&engine);
         // MetaHook does not provide one universally guarded export-table
@@ -63,14 +68,19 @@ int main(int argc,char** argv) {
         }
         const bool isHud=std::strstr(argv[i],"HudEdit")!=nullptr;
         if(isHud) {
-            if(!commands.count("hudedit_init") || !vars.empty()) {
-                std::fprintf(stderr,"HUD Edit must only register hudedit_init during startup: %s\n",argv[i]);
+            if(!commands.count("hudedit_init") || !commands.count("hudedit_status") ||
+               !commands.count("hudedit_help") || !vars.empty()) {
+                std::fprintf(stderr,"HUD Edit must expose diagnostics without registering CVars during startup: %s\n",argv[i]);
                 return 14;
             }
+            commands.at("hudedit_status")();
             commands.at("hudedit_init")();
+            commands.at("hudedit_status")();
             if(!commands.count("hudedit_start") || !vars.count("hudedit_inventory_x") ||
-               !vars.count("hudedit_flashlight_y")) {
-                std::fprintf(stderr,"HUD Edit lazy init did not register settings: %s\n",argv[i]);
+               !vars.count("hudedit_inventory_visible") ||
+               !vars.count("hudedit_flashlight_y") ||
+               !lookup("hudedit_crosshair_size")) {
+                std::fprintf(stderr,"HUD Edit lazy init did not expose settings to engine CVar lookup: %s\n",argv[i]);
                 return 16;
             }
             // Ensure the engine can retain names in the original pointer form.
@@ -84,9 +94,18 @@ int main(int argc,char** argv) {
                 std::fprintf(stderr,"CVar names became dangling pointers after registration\n");
                 return 17;
             }
-        } else if(!commands.count("sbxtma_start") || !vars.count("sbxtma_safe_mode")) {
-            std::fprintf(stderr,"Movement did not register expected CVar/command: %s\n",argv[i]);
-            return 18;
+        } else {
+            if (!commands.count("sbxtma_init") || !commands.count("sbxtma_status") ||
+                !vars.empty() || commands.count("sbxtma_start")) {
+                std::fprintf(stderr,"Movement performed unsafe early registration or lacked init: %s\n",argv[i]);
+                return 18;
+            }
+            commands.at("sbxtma_status")();
+            commands.at("sbxtma_init")();
+            if (!commands.count("sbxtma_start") || !lookup("sbxtma_safe_mode")) {
+                std::fprintf(stderr,"Movement deferred initialization failed: %s\n",argv[i]);
+                return 20;
+            }
         }
         p->Shutdown();
         std::printf("LoadLibrary/CreateInterface/LoadEngine pass: %s (%u cvars, %u commands)\n",
