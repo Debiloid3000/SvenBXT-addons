@@ -44,6 +44,8 @@ cvar_t *predictionEnabled=nullptr,*safeMode=nullptr,*addonVersion=nullptr;
 cl_exportfuncs_t* pendingExports=nullptr;
 bool activationRequested=false;
 bool movementCommandRegistered=false;
+bool movementInitRegistered=false;
+bool movementSettingsRegistered=false;
 bool sessionActive=false;
 bool enabled(cvar_t* c) { return c && c->value > 0.5f; }
 float now() { return gEngfuncs.GetClientTime ? gEngfuncs.GetClientTime() : 0.f; }
@@ -343,7 +345,11 @@ void removeHooks() {
     originalShutdown=nullptr;
 }
 void registerVariables() {
-    if (!gEngfuncs.pfnRegisterVariable) return;
+    addon_log::write("movement","sbxtma_init registering CVars");
+    if (!gEngfuncs.pfnRegisterVariable) {
+        addon_log::write("movement","sbxtma_init CVar registration unavailable");
+        return;
+    }
     mode = gEngfuncs.pfnRegisterVariable("sbxtma_mode", "1", FCVAR_ARCHIVE);
     online = gEngfuncs.pfnRegisterVariable("sbxtma_allow_online", "0", FCVAR_ARCHIVE);
     notify = gEngfuncs.pfnRegisterVariable("sbxtma_notifications", "1", FCVAR_ARCHIVE);
@@ -355,7 +361,10 @@ void registerVariables() {
     triggerWidth = gEngfuncs.pfnRegisterVariable("sbxtma_trigger_width", "0", FCVAR_ARCHIVE);
     predictionEnabled=gEngfuncs.pfnRegisterVariable("sbxtma_prediction", "0", FCVAR_ARCHIVE);
     safeMode=gEngfuncs.pfnRegisterVariable("sbxtma_safe_mode", "1", FCVAR_ARCHIVE);
-    addonVersion=gEngfuncs.pfnRegisterVariable("sbxtma_version", "2.1.0", 0);
+    addonVersion=gEngfuncs.pfnRegisterVariable("sbxtma_version", "2.2.0", 0);
+    movementSettingsRegistered = (mode && safeMode && addonVersion);
+    addon_log::write("movement", movementSettingsRegistered ?
+        "sbxtma_init CVars registered" : "sbxtma_init CVars registration returned null");
 }
 // Start the hooks only when explicitly requested in a RUNNING game.
 // A successful LoadLibrary must never install a client detour.
@@ -405,6 +414,27 @@ void deactivate() {
     sessionActive=false;
     addon.shutdown();
 }
+void movementStatus() {
+    addon_log::write("movement", movementSettingsRegistered ?
+        "STATUS: movement CVars initialized" : "STATUS: movement CVars not initialized");
+    if(gEngfuncs.Con_Printf)
+        gEngfuncs.Con_Printf("Movement: %s; hooks %s. Try sbxtma_init, then sbxtma_start.\n",
+            movementSettingsRegistered?"CVars ready":"CVars missing",
+            sessionActive?"active":"inactive");
+}
+void movementInitialize() {
+    addon_log::write("movement","sbxtma_init invoked");
+    if(!movementSettingsRegistered)
+        registerVariables();
+    if(!movementCommandRegistered && gEngfuncs.pfnAddCommand) {
+        addon_log::write("movement","sbxtma_init BEFORE command registration");
+        gEngfuncs.pfnAddCommand("sbxtma_start",&activate);
+        gEngfuncs.pfnAddCommand("sbxtma_stop",&deactivate);
+        movementCommandRegistered=true;
+        addon_log::write("movement","sbxtma_init command registration complete");
+    }
+    addon_log::write("movement","sbxtma_init complete");
+}
 } // namespace
 
 void IPluginsV4::Init(metahook_api_t* api, mh_interface_t* interfaces, mh_enginesave_t* save) {
@@ -412,24 +442,26 @@ void IPluginsV4::Init(metahook_api_t* api, mh_interface_t* interfaces, mh_engine
     addon_log::write("movement","V4 Init");
 }
 void IPluginsV4::LoadEngine(cl_enginefunc_t* funcs) {
+    addon_log::write("movement","LoadEngine begin");
     if (!funcs) return;
     gEngfuncs = *funcs;
-    addon_log::write("movement","LoadEngine begin");
-    registerVariables();
-    if(!movementCommandRegistered && gEngfuncs.pfnAddCommand) {
-        gEngfuncs.pfnAddCommand("sbxtma_start",&activate);
-        gEngfuncs.pfnAddCommand("sbxtma_stop",&deactivate);
-        movementCommandRegistered=true;
-    }
-    addon_log::write("movement","LoadEngine completed (passive)");
+    // No CVar or command registration at early engine load. Previous
+    // user log showed the game stopping at this point.
+    addon_log::write("movement","LoadEngine completed (no registrations)");
 }
 void IPluginsV4::LoadClient(cl_exportfuncs_t* exports) {
-    addon_log::write("movement","LoadClient (no automatic hooks)");
+    addon_log::write("movement","LoadClient entry");
     pendingExports=exports;
-    // Startup safety is mandatory. Even an archived mode=2 must not
-    // overwrite client callbacks before user explicitly enables them.
+    if(!movementInitRegistered && gEngfuncs.pfnAddCommand) {
+        addon_log::write("movement","LoadClient before sbxtma_init");
+        gEngfuncs.pfnAddCommand("sbxtma_init",&movementInitialize);
+        gEngfuncs.pfnAddCommand("sbxtma_status",&movementStatus);
+        movementInitRegistered=true;
+        addon_log::write("movement","LoadClient sbxtma_init registered");
+    }
+    addon_log::write("movement","LoadClient completed (no automatic hooks)");
 }
 void IPluginsV4::Shutdown() { addon_log::write("movement","V4 Shutdown"); removeHooks(); }
 void IPluginsV4::ExitGame(int) { addon_log::write("movement","V4 ExitGame"); removeHooks(); }
-const char* IPluginsV4::GetVersion() { return "2.1.0-safe"; }
+const char* IPluginsV4::GetVersion() { return "2.2.0-diagnostic"; }
 EXPOSE_SINGLE_INTERFACE(IPluginsV4, IPluginsV4, METAHOOK_PLUGIN_API_VERSION_V4);
