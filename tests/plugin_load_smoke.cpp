@@ -1,6 +1,5 @@
 #include <metahook.h>
 #include <IPlugins.h>
-#include <cdll_export.h>
 #include <cvardef.h>
 #include <windows.h>
 #include <cstdio>
@@ -47,10 +46,14 @@ int main(int argc,char** argv) {
         engine.pfnAddCommand=&cmd;
         p->Init(nullptr,nullptr,nullptr);
         p->LoadEngine(&engine);
-        cl_exportfuncs_t fakeExports={};
-        cl_exportfuncs_t snapshot=fakeExports;
-        p->LoadClient(&fakeExports);
-        if(std::memcmp(&snapshot,&fakeExports,sizeof(fakeExports))!=0) {
+        // MetaHook does not provide one universally guarded export-table
+        // definition. Use opaque aligned backing memory and verify that a
+        // PASSIVE LoadClient leaves it byte-for-byte unchanged.
+        alignas(void*) unsigned char fakeExports[2048]={};
+        unsigned char snapshot[sizeof(fakeExports)]={};
+        std::memcpy(snapshot,fakeExports,sizeof(fakeExports));
+        p->LoadClient(reinterpret_cast<cl_exportfuncs_t*>(fakeExports));
+        if(std::memcmp(snapshot,fakeExports,sizeof(fakeExports))!=0) {
             std::fprintf(stderr,"Plugin modified client callbacks during startup: %s\n",argv[i]);
             return 15;
         }
