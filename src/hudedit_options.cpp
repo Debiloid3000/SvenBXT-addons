@@ -142,7 +142,10 @@ void HudEditOptions_Register() {
 }
 void HudEditOptions_Unregister() {
     if(!extension) return;
-    extension->UnregisterGameUIOptionDialogCallbacks(&optionsCallbacks);
+    // Метахук может выгрузить VGUI2Extension раньше этого аддона.
+    // Не разыменовываем указатель на уже выгруженную библиотеку.
+    if(GetModuleHandleA("VGUI2Extension.dll"))
+        extension->UnregisterGameUIOptionDialogCallbacks(&optionsCallbacks);
     extension=nullptr;
     g_pVGuiSurface2=nullptr;
     g_pVGuiSchemeManager2=nullptr;
