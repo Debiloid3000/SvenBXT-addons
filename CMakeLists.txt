@@ -1,4 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
+cmake_policy(SET CMP0091 NEW)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 project(SvenBXTMovement LANGUAGES CXX)
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
     message(FATAL_ERROR "Requires Windows MSVC x86 (-A Win32)")
@@ -30,29 +32,20 @@ target_compile_options(SvenBXTMovement PRIVATE /W3 /EHsc /MP /utf-8)
 set_target_properties(SvenBXTMovement PROPERTIES OUTPUT_NAME SvenBXTMovement)
 install(TARGETS SvenBXTMovement RUNTIME DESTINATION svencoop/metahook/plugins)
 
-# A second, fully independent DLL. Movement can be installed without HUD Edit.
+# Startup-safe HUD Edit: no VGUI options DLL or renderer detours at load time.
+# Native VGUI frontend remains as experimental source but is NOT included
+# in the stable nightly DLL until it is tested in a real SvEngine session.
 add_library(SvenBXTHudEdit SHARED
-    src/hudedit_options.cpp
     src/hudedit.cpp
     "${METAHOOK_SDK_DIR}/include/HLSDK/common/interface.cpp")
 get_target_property(_svenbxt_include_dirs SvenBXTMovement INCLUDE_DIRECTORIES)
 target_include_directories(SvenBXTHudEdit PRIVATE ${_svenbxt_include_dirs})
-set(VGUI2EXTENSION_SDK_DIR "" CACHE PATH "Checkout of MetaHookSv/VGUI2Extension for optional Options tab")
-if(EXISTS "${VGUI2EXTENSION_SDK_DIR}/include/Interface/IVGUI2Extension.h")
-  include(cmake/HudEditVguiSources.cmake)
-  target_sources(SvenBXTHudEdit PRIVATE ${HUDEDIT_VGUI_SOURCES})
-  target_include_directories(SvenBXTHudEdit PRIVATE
-    "${VGUI2EXTENSION_SDK_DIR}/include/Interface"
-    "${VGUI2EXTENSION_SDK_DIR}/include/Interface/VGUI"
-    "${METAHOOK_SDK_DIR}/include/VGUI"
-    "${METAHOOK_SDK_DIR}/include/vgui_controls"
-    "${METAHOOK_SDK_DIR}/include/Interface/VGUI"
-  )
-else()
-  message(FATAL_ERROR "To build the Options tab, provide -DVGUI2EXTENSION_SDK_DIR=<checkout of MetaHookSv/VGUI2Extension>")
-endif()
-target_compile_definitions(SvenBXTHudEdit PRIVATE WIN32 _WINDOWS _USRDLL NOMINMAX NO_MALLOC_OVERRIDE _CRT_SECURE_NO_WARNINGS VGUI_USE_SURFACE2 VGUI_USE_SCHEME2 VGUI_USE_INPUT2 NO_TIER0_MINIDUMP NO_VCR STEAM_API_NODLL)
-target_compile_options(SvenBXTHudEdit PRIVATE /W3 /EHsc /MP /utf-8 /permissive /wd4291 /wd4311 /wd4312 /wd4819 /wd4996)
+target_compile_definitions(SvenBXTHudEdit PRIVATE
+    WIN32 _WINDOWS _USRDLL NOMINMAX NO_MALLOC_OVERRIDE _CRT_SECURE_NO_WARNINGS)
+target_compile_options(SvenBXTHudEdit PRIVATE /W3 /EHsc /MP /utf-8)
 set_target_properties(SvenBXTHudEdit PROPERTIES OUTPUT_NAME SvenBXTHudEdit)
 install(TARGETS SvenBXTHudEdit RUNTIME DESTINATION svencoop/metahook/plugins)
 
+# DLL import and factory tests run before uploading the release assets.
+add_executable(SvenBXTLoadSmoke tests/plugin_load_smoke.cpp)
+target_compile_options(SvenBXTLoadSmoke PRIVATE /W3 /utf-8)
