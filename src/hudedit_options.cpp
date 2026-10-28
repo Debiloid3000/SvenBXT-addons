@@ -1,6 +1,7 @@
 // Optional native Options -> HUD Edit tab provided through MetaHookSv VGUI2Extension.
 // Plugin functionality is independent: if VGUI2Extension is missing, only the tab is absent.
 #include <metahook.h>
+#include <cvardef.h>
 #include <IVGUI2Extension.h>
 #include <vgui_controls/PropertyPage.h>
 #include <vgui_controls/Label.h>
@@ -25,7 +26,8 @@ float value(const char* name,float fallback) {
     return c?c->value:fallback;
 }
 int clamped(const char* name,int fallback,int low,int high) {
-    return std::max(low,std::min(high,static_cast<int>(value(name,static_cast<float>(fallback)))));
+    const int v=static_cast<int>(value(name,static_cast<float>(fallback)));
+    return v<low ? low : (v>high ? high : v);
 }
 class HudEditPage : public vgui::PropertyPage {
     DECLARE_CLASS_SIMPLE(HudEditPage, vgui::PropertyPage);
