@@ -91,6 +91,13 @@ cvar_t *healthNR=nullptr,*healthNG=nullptr,*healthNB=nullptr,*healthNTheme=nullp
 cvar_t *healthIR=nullptr,*healthIG=nullptr,*healthIB=nullptr,*healthITheme=nullptr;
 cvar_t *armorNR=nullptr,*armorNG=nullptr,*armorNB=nullptr,*armorNTheme=nullptr;
 cvar_t *armorIR=nullptr,*armorIG=nullptr,*armorIB=nullptr,*armorITheme=nullptr;
+cvar_t *rainbowAll=nullptr,*criticalPriority=nullptr;
+cvar_t *chEnabled=nullptr,*chPreview=nullptr,*chSize=nullptr,*chThickness=nullptr;
+cvar_t *chGap=nullptr,*chOutline=nullptr,*chDot=nullptr,*chAlpha=nullptr,*chDynamic=nullptr;
+cvar_t *chTStyle=nullptr,*chUseTheme=nullptr,*chRed=nullptr,*chGreen=nullptr,*chBlue=nullptr;
+cvar_t *chOutlineRed=nullptr,*chOutlineGreen=nullptr,*chOutlineBlue=nullptr;
+bool suppressingNativeCrosshair=false;
+float savedNativeCrosshair=1;
 
 int health = -1, armor = -1;
 float speed = 0, damagedUntil = 0;
@@ -100,6 +107,7 @@ float savedSpeedState = 1, savedHudState = 1;
 float now() { return gEngfuncs.GetClientTime ? gEngfuncs.GetClientTime() : 0.f; }
 float val(cvar_t* c, float fallback=0) { return c ? c->value : fallback; }
 bool yes(cvar_t* c) { return val(c) >= .5f; }
+bool globalRainbow() { return yes(rainbow) && yes(rainbowAll); }
 int byte(float x) { return static_cast<int>(std::lround(std::max(0.f, std::min(255.f, x)))); }
 int coord(cvar_t* c, int automatic) { return c && c->value >= 0 ? static_cast<int>(c->value) : automatic; }
 
@@ -122,13 +130,14 @@ RGB mainColor() {
 }
 RGB lowColor() { return {byte(val(lowR,250)),byte(val(lowG,25)),byte(val(lowB,45))}; }
 RGB currentHealthColor() {
-    return !yes(forceAllColors) && ((health >= 0 && health <= val(critical,25)) || now() < damagedUntil)
+    return (health >= 0 && health <= val(critical,25) || now() < damagedUntil) &&
+           yes(criticalPriority) && !yes(forceAllColors) && !globalRainbow()
         ? lowColor() : mainColor();
 }
 void transform(int& red,int& green,int& blue) {
     if (!yes(active)) return;
     RGB c;
-    if (yes(forceAllColors)) c=mainColor();
+    if (yes(forceAllColors) || globalRainbow()) c=mainColor();
     else if (red==100 && green==130 && blue==200) c=mainColor();
     else if (red==250 && green==0 && blue==0) c=lowColor();
     else return;
@@ -138,7 +147,7 @@ RGB styled(bool theme,cvar_t* red,cvar_t* green,cvar_t* blue) {
     return theme ? mainColor() : RGB{byte(val(red,255)),byte(val(green,255)),byte(val(blue,255))};
 }
 RGB groupColor(const HudGroup& group) {
-    return styled(yes(forceAllColors)||yes(group.useTheme),group.red,group.green,group.blue);
+    return styled(yes(forceAllColors)||globalRainbow()||yes(group.useTheme),group.red,group.green,group.blue);
 }
 hudedit::Region bounds(const HudGroup& group) {
     return {static_cast<int>(val(group.regionX,0)),static_cast<int>(val(group.regionY,0)),
@@ -296,11 +305,15 @@ void registerGroup(HudGroup& group,const char* key,bool defaultEnabled,
 }
 void settings() {
     reg(active,"hudedit_enabled","1");
+    cvar_t* version=nullptr;
+    reg(version,"hudedit_version","2.0.0");
     reg(r,"hudedit_r","100"); reg(g,"hudedit_g","130"); reg(b,"hudedit_b","200");
     reg(lowR,"hudedit_critical_r","250");reg(lowG,"hudedit_critical_g","25");
     reg(lowB,"hudedit_critical_b","45");reg(critical,"hudedit_critical_hp","25");
     reg(rainbow,"hudedit_rainbow","0");reg(rainbowSpeed,"hudedit_rainbow_speed","0.10");
     reg(flashTime,"hudedit_damage_flash","0.5");
+    reg(rainbowAll,"hudedit_rainbow_all","1");
+    reg(criticalPriority,"hudedit_critical_priority","0");
     reg(hideStock,"hudedit_hide_stock","0");
     reg(healthCustom,"hudedit_health","0");reg(armorCustom,"hudedit_armor","0");
     reg(healthNumber,"hudedit_health_number","1");reg(healthIcon,"hudedit_health_icon","1");
@@ -345,6 +358,23 @@ void settings() {
     reg(armorIR,"hudedit_armor_icon_r","255");
     reg(armorIG,"hudedit_armor_icon_g","255");
     reg(armorIB,"hudedit_armor_icon_b","255");
+    reg(chEnabled,"hudedit_crosshair","0");
+    reg(chPreview,"hudedit_crosshair_preview","0");
+    reg(chSize,"hudedit_crosshair_size","12");
+    reg(chThickness,"hudedit_crosshair_thickness","2");
+    reg(chGap,"hudedit_crosshair_gap","5");
+    reg(chOutline,"hudedit_crosshair_outline","1");
+    reg(chDot,"hudedit_crosshair_dot","0");
+    reg(chAlpha,"hudedit_crosshair_alpha","255");
+    reg(chDynamic,"hudedit_crosshair_dynamic","0");
+    reg(chTStyle,"hudedit_crosshair_t","0");
+    reg(chUseTheme,"hudedit_crosshair_use_theme","1");
+    reg(chRed,"hudedit_crosshair_r","40");
+    reg(chGreen,"hudedit_crosshair_g","230");
+    reg(chBlue,"hudedit_crosshair_b","100");
+    reg(chOutlineRed,"hudedit_crosshair_outline_r","0");
+    reg(chOutlineGreen,"hudedit_crosshair_outline_g","0");
+    reg(chOutlineBlue,"hudedit_crosshair_outline_b","0");
 }
 bool canDraw() {
     return yes(active) && gEngfuncs.pfnGetScreenInfo &&
@@ -401,6 +431,10 @@ void restoreSettings() {
         gEngfuncs.Cvar_SetValue("hud_draw",savedHudState);
         suppressingOriginalHud=false;
     }
+    if(suppressingNativeCrosshair) {
+        gEngfuncs.Cvar_SetValue("crosshair",savedNativeCrosshair);
+        suppressingNativeCrosshair=false;
+    }
 }
 void syncVisibility() {
     if (!gEngfuncs.Cvar_SetValue || !gEngfuncs.pfnGetCvarPointer) return;
@@ -413,6 +447,17 @@ void syncVisibility() {
         } else if (!needSpeed && suppressingOriginalSpeed) {
             gEngfuncs.Cvar_SetValue("sbxt_hud_speedometer",savedSpeedState);
             suppressingOriginalSpeed=false;
+        }
+    }
+    const bool needCrosshair=yes(active)&&yes(chEnabled);
+    if(auto* c=gEngfuncs.pfnGetCvarPointer("crosshair")) {
+        if(needCrosshair && !suppressingNativeCrosshair) {
+            savedNativeCrosshair=c->value;
+            gEngfuncs.Cvar_SetValue("crosshair",0);
+            suppressingNativeCrosshair=true;
+        } else if(!needCrosshair && suppressingNativeCrosshair) {
+            gEngfuncs.Cvar_SetValue("crosshair",savedNativeCrosshair);
+            suppressingNativeCrosshair=false;
         }
     }
     // ВНИМАНИЕ: hud_draw отключает стандартный HUD целиком, включая ammo/map HUD.
@@ -428,6 +473,29 @@ void syncVisibility() {
         }
     }
 }
+// All values control *visual* overlay only. Never modify viewangles or commands.
+void drawCrosshair(int screenW,int screenH) {
+    if((!yes(chEnabled) && !yes(chPreview)) || !yes(active) ||
+       !gEngfuncs.pfnFillRGBA) return;
+    const int x=screenW/2,y=screenH/2;
+    const int size=std::max(1,std::min(100,static_cast<int>(val(chSize,12))));
+    const int thick=std::max(1,std::min(20,static_cast<int>(val(chThickness,2))));
+    const int extra=yes(chDynamic) ? std::min(25,static_cast<int>(std::fabs(speed)*.025f)) : 0;
+    const int gap=std::max(0,std::min(100,static_cast<int>(val(chGap,5))+extra));
+    const int alpha=byte(val(chAlpha,255));
+    const RGB color=styled(yes(chUseTheme)||yes(forceAllColors)||globalRainbow(),chRed,chGreen,chBlue);
+    const RGB outline={byte(val(chOutlineRed)),byte(val(chOutlineGreen)),byte(val(chOutlineBlue))};
+    auto bar=[&](int bx,int by,int w,int h) {
+        if(yes(chOutline)) gEngfuncs.pfnFillRGBA(bx-1,by-1,w+2,h+2,outline.r,outline.g,outline.b,alpha);
+        gEngfuncs.pfnFillRGBA(bx,by,w,h,color.r,color.g,color.b,alpha);
+    };
+    // Static 4-way reticle; optional CS-style T shape.
+    bar(x-gap-size,y-thick/2,size,thick);
+    bar(x+gap,y-thick/2,size,thick);
+    if(!yes(chTStyle))bar(x-thick/2,y-gap-size,thick,size);
+    bar(x-thick/2,y+gap,thick,size);
+    if(yes(chDot))bar(x-thick/2,y-thick/2,thick,thick);
+}
 void drawOverlay() {
     if (!canDraw()) return;
     SCREENINFO screen={};
@@ -437,9 +505,10 @@ void drawOverlay() {
     const RGB theme=mainColor();
     const int scale=std::max(1,std::min(5,static_cast<int>(val(speedScale,2))));
     if (yes(healthCustom) && health>=0) {
-        const bool danger=health <= val(critical,25) || now()<damagedUntil;
-        const RGB numberColor=danger && !yes(forceAllColors)?lowColor():styled(yes(forceAllColors)||yes(healthNTheme),healthNR,healthNG,healthNB);
-        const RGB iconColor=danger && !yes(forceAllColors)?lowColor():styled(yes(forceAllColors)||yes(healthITheme),healthIR,healthIG,healthIB);
+        const bool danger=yes(criticalPriority) && !globalRainbow() &&
+            (health <= val(critical,25) || now()<damagedUntil);
+        const RGB numberColor=danger && !yes(forceAllColors)?lowColor():styled(yes(forceAllColors)||globalRainbow()||yes(healthNTheme),healthNR,healthNG,healthNB);
+        const RGB iconColor=danger && !yes(forceAllColors)?lowColor():styled(yes(forceAllColors)||globalRainbow()||yes(healthITheme),healthIR,healthIG,healthIB);
         if(yes(healthNumber))number(coord(healthNX,65),coord(healthNY,screen.iHeight-60),
                                    health,numberColor,true,2);
         if(yes(healthIcon))plusIcon(coord(healthIX,25),coord(healthIY,screen.iHeight-55),
@@ -447,19 +516,20 @@ void drawOverlay() {
     }
     if (yes(armorCustom) && armor>=0) {
         if(yes(armorNumber))number(coord(armorNX,205),coord(armorNY,screen.iHeight-60),
-                                  armor,styled(yes(forceAllColors)||yes(armorNTheme),armorNR,armorNG,armorNB),true,2);
+                                  armor,styled(yes(forceAllColors)||globalRainbow()||yes(armorNTheme),armorNR,armorNG,armorNB),true,2);
         if(yes(armorIcon))shieldIcon(coord(armorIX,165),coord(armorIY,screen.iHeight-55),
-                                   styled(yes(forceAllColors)||yes(armorITheme),armorIR,armorIG,armorIB));
+                                   styled(yes(forceAllColors)||globalRainbow()||yes(armorITheme),armorIR,armorIG,armorIB));
     }
     if(yes(speedEnable)) {
         const int x=coord(speedX,screen.iWidth/2-22);
         const int y=coord(speedY,screen.iHeight-77);
-        RGB speedColor=yes(speedTheme)?theme:RGB{byte(val(speedR,255)),
+        RGB speedColor=(yes(speedTheme)||yes(forceAllColors)||globalRainbow())?theme:RGB{byte(val(speedR,255)),
                                byte(val(speedG,255)),byte(val(speedB,255))};
         number(x,y,static_cast<int>(std::lround(speed)),speedColor,
                val(speedStyle,1)>=.5f,scale);
         if(yes(speedLabel))consoleText(x,y+scale*9,"u/s",speedColor);
     }
+    drawCrosshair(screen.iWidth,screen.iHeight);
     drawingCustomOverlay=false;
 }
 void onView(ref_params_t* params) {
@@ -484,7 +554,6 @@ int onRedraw(float t,int intermission) {
 }
 void onHudInit() {
     if(oldInit)oldInit();
-    // Регистрируем настройки только после готовности клиентского HUD.
     if(!settingsRegistered) {
         settings();
         settingsRegistered=true;
@@ -540,6 +609,16 @@ void IPluginsV4::Init(metahook_api_t* api,mh_interface_t* i,mh_enginesave_t* sav
 void IPluginsV4::LoadEngine(cl_enginefunc_t* engine) {
     if (!engine) return;
     gEngfuncs=*engine;
+    // HUD_Init может быть пропущен ранней загрузкой MetaHook.
+    // Регистрация в LoadEngine гарантирует наличие CVars до первого кадра.
+    if(!settingsRegistered && gEngfuncs.pfnRegisterVariable) {
+        settings();
+        settingsRegistered=true;
+    }
+    if(!colorCommandRegistered && gEngfuncs.pfnAddCommand) {
+        gEngfuncs.pfnAddCommand("hudedit_color",&changeColorCommand);
+        colorCommandRegistered=true;
+    }
     if (!g_pMetaHookAPI) return;
     if (gEngfuncs.pfnSPR_Set && !spriteHook)
         spriteHook=g_pMetaHookAPI->InlineHook(
