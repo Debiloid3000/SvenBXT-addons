@@ -201,3 +201,48 @@ hudedit_armor_number_b 255
 Команда `hudedit_color 255 255 255` остаётся глобальным вариантом и перекрывает локальные цвета, пока `hudedit_all_colors 1`. Для локальных цветов верни `hudedit_all_colors 0`.
 
 Оба аддона собираются **независимыми** DLL и публикуются по отдельности в одном релизе. Этот режим является экспериментальным, не утверждает поддержку всех путей VGUI и требует реальной проверки на установленной Sven Co-op.
+
+---
+## HUD Edit 2.0: Options, прицел и диагностика
+
+**Options → HUD Edit** доступна при установленном `VGUI2Extension.dll` из MetaHookSv; без него обе игровые DLL остаются независимыми и могут загружаться, но вкладка не появится. Вкладка использует обычные архивируемые CVars. Прямой запуск и работа этого интерфейса в игре требуют тестирования.
+
+Проверка версии в консоли: `hudedit_version` (ожидается 2.0.0); `hudedit_inventory_x` (должен существовать); `sbxtma_version` (ожидается 2.0.0). Если какая-то команда неизвестна, убедитесь, что не загружена старая DLL, проверьте содержимое `svencoop/metahook/configs/plugins.lst` и физический путь к DLL `svencoop/metahook/plugins/`.
+
+### Визуальный прицел (HUD overlay)
+```cfg
+hudedit_crosshair 1
+hudedit_crosshair_size 14
+hudedit_crosshair_gap 5
+hudedit_crosshair_thickness 2
+hudedit_crosshair_dot 1
+hudedit_crosshair_outline 1
+hudedit_crosshair_t 0
+hudedit_crosshair_dynamic 0
+hudedit_crosshair_alpha 255
+hudedit_crosshair_use_theme 0
+hudedit_crosshair_r 40
+hudedit_crosshair_g 230
+hudedit_crosshair_b 100
+hudedit_crosshair_outline_r 0
+hudedit_crosshair_outline_g 0
+hudedit_crosshair_outline_b 0
+```
+При активации своего прицела `crosshair` временно отключается, а при отключении исходное значение восстанавливается. `hudedit_crosshair_preview 1` показывает рисунок прицела в игре без выключения стандартного. Оба режима только визуальные и не меняют игровую камеру.
+
+### Rainbow для всего поддерживаемого HUD
+```cfg
+hudedit_color 255 255 255
+hudedit_rainbow 1
+hudedit_rainbow_all 1
+hudedit_critical_priority 0
+```
+`hudedit_critical_priority 0` позволяет Rainbow заменить критический цвет HP. Для выделения критического HP установите `hudedit_rainbow 0` и `hudedit_critical_priority 1`. Внешние VGUI панели могут игнорировать стандартные хуки спрайтов и текста.
+
+### Безопасный запуск Movement
+```cfg
+sbxtma_mode 1
+sbxtma_safe_mode 1
+sbxtma_prediction 0
+```
+Стабильный по умолчанию режим Movement не вызывает необязательную трассировку и не выполняет InlineHook на машинный код. В режиме Assist до оригинальной физики нужно отдельно установить `sbxtma_safe_mode 0`; это экспериментально. Если игра всё равно вылетает, удалите только строку Movement из `plugins.lst`, оставив HUD Edit, и приложите журнал запуска и дамп краша — одной сборки для проверки совместимости со Sven Co-op 5.26 недостаточно.
