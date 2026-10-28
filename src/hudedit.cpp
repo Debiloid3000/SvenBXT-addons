@@ -800,10 +800,58 @@ void hudeditStatus() {
             "HUD Edit: missing CVars; send SvenBXT_addons_boot.log\n" :
             "HUD Edit: core CVars found. Use hudedit_start for overlay.\n");
 }
+
+void hudeditSet() {
+    if(!gEngfuncs.Cmd_Argc || !gEngfuncs.Cmd_Argv ||
+       gEngfuncs.Cmd_Argc()!=3) {
+        if(gEngfuncs.Con_Printf)
+            gEngfuncs.Con_Printf("Usage: hudedit_set inventory_x 200 (or hudedit_inventory_x 200)\n");
+        return;
+    }
+    const char* shortName=gEngfuncs.Cmd_Argv(1);
+    const char* requested=gEngfuncs.Cmd_Argv(2);
+    if(!shortName||!requested) return;
+    std::string name=shortName;
+    if(name.rfind("hudedit_",0)!=0) name="hudedit_"+name;
+    char* tail=nullptr;
+    float value=std::strtof(requested,&tail);
+    if(tail==requested || *tail || !std::isfinite(value) ||
+       value < -30000.0f || value > 30000.0f) {
+        if(gEngfuncs.Con_Printf)
+            gEngfuncs.Con_Printf("HUD Edit: invalid number\n");
+        return;
+    }
+    cvar_t* target=nullptr;
+    for(size_t i=0;i<registeredCount;++i) {
+        if(registeredCVars[i].name && name==registeredCVars[i].name) {
+            target=registeredCVars[i].ptr;
+            break;
+        }
+    }
+    if(!target) {
+        if(gEngfuncs.Con_Printf)
+            gEngfuncs.Con_Printf("HUD Edit: %s not registered; run hudedit_init\n",name.c_str());
+        return;
+    }
+    if(gEngfuncs.Cvar_SetValue)
+        gEngfuncs.Cvar_SetValue(name.c_str(),value);
+    bool temporary=false;
+    if(std::fabs(target->value-value)>.001f) {
+        // The console CVar resolver may be incompatible with the MetaHook
+        // client registration on this Sven Co-op build. Keep the in-memory
+        // control usable; this direct fallback is NOT archived/persistent.
+        target->value=value;
+        temporary=true;
+        addon_log::write("hudedit","hudedit_set used temporary pointer fallback");
+    }
+    if(gEngfuncs.Con_Printf)
+        gEngfuncs.Con_Printf("HUD Edit: %s = %.3f%s\n",name.c_str(),
+            target->value,temporary?" (temporary, not saved)":"");
+}
 void hudeditHelp() {
     if(gEngfuncs.Con_Printf)
         gEngfuncs.Con_Printf(
-            "HUD Edit: hudedit_init, hudedit_status, hudedit_help, hudedit_color R G B, hudedit_start, hudedit_stop\n"
+            "HUD Edit: hudedit_init, hudedit_status, hudedit_help, hudedit_set NAME VALUE, hudedit_color R G B, hudedit_start, hudedit_stop\n"
             "Inventory: hudedit_inventory_x/y and hudedit_inventory_visible 0/1\n"
             "Flashlight: hudedit_flashlight_enabled 1, hudedit_flashlight_use_theme 0, hudedit_flashlight_r/g/b\n");
 }
@@ -831,6 +879,7 @@ void lazyInitialize() {
         gEngfuncs.pfnAddCommand("hudedit_messages_on",&enableMessages);
         gEngfuncs.pfnAddCommand("hudedit_native_on",&enableNativeHooks);
         gEngfuncs.pfnAddCommand("hudedit_native_off",&disableNativeHooks);
+        gEngfuncs.pfnAddCommand("hudedit_set",&hudeditSet);
         colorCommandRegistered=true;
         addon_log::write("hudedit","hudedit_init extra commands complete");
     }
