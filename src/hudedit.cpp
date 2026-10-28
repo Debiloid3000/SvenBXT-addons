@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <array>
+#include <string>
 #include "hudedit_layout.hpp"
 #include "hudedit_regions.hpp"
 #include "startup_diagnostics.hpp"
