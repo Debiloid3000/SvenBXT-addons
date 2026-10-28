@@ -26,13 +26,17 @@ using namespace sbxtma;
 using MoveFn = void (*)(playermove_t*, int);
 using RedrawFn = int (*)(float, int);
 
-hook_t* movementHook = nullptr;
-hook_t* redrawHook = nullptr;
+// Крашоустойчивый режим: заменяем функции в экспортной таблице клиента,
+// вместо изменения кода по адресу с InlineHook. MetaHook V4 разрешает это.
+cl_exportfuncs_t* hookedExports=nullptr;
+using ShutdownFn = void (*)();
+ShutdownFn originalShutdown=nullptr;
 MoveFn originalMovement = nullptr;
 RedrawFn originalRedraw = nullptr;
 cvar_t *mode = nullptr, *online = nullptr, *notify = nullptr;
 cvar_t *edgeEnabled = nullptr, *jumpEnabled = nullptr, *strafeEnabled = nullptr;
 cvar_t *pixelEnabled = nullptr, *boostEnabled = nullptr, *triggerWidth = nullptr;
+cvar_t *predictionEnabled=nullptr,*safeMode=nullptr,*addonVersion=nullptr;
 bool enabled(cvar_t* c) { return c && c->value > 0.5f; }
 float now() { return gEngfuncs.GetClientTime ? gEngfuncs.GetClientTime() : 0.f; }
 
@@ -173,7 +177,10 @@ public:
         if (!pm || server || pm->server) return;
         // Только после вызова оригинальной HUD_PlayerMove глобальный контекст
         // pmove принадлежит корректному кадру, и можно безопаснее трассировать.
-        if (pm->movevars && pm->PM_PlayerTrace && pm->frametime > 0 && !pm->dead) {
+        // Не трогаем client trace API по умолчанию: на некоторых билдах
+        // Sven Co-op старые сигнатуры и таблицы PM_PlayerTrace не совпадают.
+        if (enabled(predictionEnabled) && pm->movevars && pm->PM_PlayerTrace &&
+            pm->frametime > 0 && pm->frametime <= .05f && !pm->dead) {
             previousForecast = predictor.twoTicks(*pm);
             haveForecast = true;
         } else {
@@ -263,29 +270,50 @@ private:
 MovementAddon addon;
 
 void onMove(playermove_t* pm, int server) {
-    if (!pm) { if (originalMovement) originalMovement(pm, server); return; }
-    // В 5.26 physents/visents/touchindex содержат по 1024 элемента;
-    // обычная 600-element HL структура НЕ совместима с SvEngine.
+    // Никаких обращений к структуре до оригинальной функции, пока игра
+    // инициализирует кадр. В режиме Assist используется прошлый прогноз.
+    const bool safe = enabled(safeMode);
     const bool sven = g_pMetaHookAPI && g_pMetaHookAPI->GetEngineType &&
                       g_pMetaHookAPI->GetEngineType() == ENGINE_SVENGINE;
-    if (sven) addon.before(reinterpret_cast<playermove_10152_t*>(pm), server);
-    else addon.before(pm, server);
-    if (originalMovement) originalMovement(pm, server);
-    if (sven) addon.after(reinterpret_cast<playermove_10152_t*>(pm), server);
-    else addon.after(pm, server);
+    if(pm && !safe && mode && mode->value >= 1.5f) {
+        if (sven) addon.before(reinterpret_cast<playermove_10152_t*>(pm), server);
+        else addon.before(pm, server);
+    }
+    if(originalMovement) originalMovement(pm, server);
+    if(!pm) return;
+    if(sven) {
+        if(safe) addon.before(reinterpret_cast<playermove_10152_t*>(pm),server);
+        addon.after(reinterpret_cast<playermove_10152_t*>(pm),server);
+    } else {
+        if(safe) addon.before(pm,server);
+        addon.after(pm,server);
+    }
 }
 int onRedraw(float t, int intermission) {
     int result = originalRedraw ? originalRedraw(t, intermission) : 1;
     if (!intermission) addon.draw();
     return result;
 }
+void onClientShutdown() {
+    // Восстанавливаем экспортированные функции, пока таблица клиента жива.
+    if(hookedExports) {
+        if(hookedExports->HUD_PlayerMove==&onMove) hookedExports->HUD_PlayerMove=originalMovement;
+        if(hookedExports->HUD_Redraw==&onRedraw) hookedExports->HUD_Redraw=originalRedraw;
+        if(hookedExports->HUD_Shutdown==&onClientShutdown)
+            hookedExports->HUD_Shutdown=originalShutdown;
+    }
+    hookedExports=nullptr;
+    if(originalShutdown) originalShutdown();
+    addon.shutdown();
+}
 void removeHooks() {
     addon.shutdown();
-    if (g_pMetaHookAPI && movementHook) g_pMetaHookAPI->UnHook(movementHook);
-    if (g_pMetaHookAPI && redrawHook) g_pMetaHookAPI->UnHook(redrawHook);
-    movementHook = redrawHook = nullptr;
-    originalMovement = nullptr;
-    originalRedraw = nullptr;
+    // Нельзя разыменовывать экспортную таблицу после выгрузки client.dll.
+    // onClientShutdown восстанавливает указатели до выгрузки.
+    hookedExports=nullptr;
+    originalMovement=nullptr;
+    originalRedraw=nullptr;
+    originalShutdown=nullptr;
 }
 void registerVariables() {
     if (!gEngfuncs.pfnRegisterVariable) return;
@@ -298,6 +326,9 @@ void registerVariables() {
     pixelEnabled = gEngfuncs.pfnRegisterVariable("sbxtma_pixelsurf", "1", FCVAR_ARCHIVE);
     boostEnabled = gEngfuncs.pfnRegisterVariable("sbxtma_objectboost", "0", FCVAR_ARCHIVE);
     triggerWidth = gEngfuncs.pfnRegisterVariable("sbxtma_trigger_width", "0", FCVAR_ARCHIVE);
+    predictionEnabled=gEngfuncs.pfnRegisterVariable("sbxtma_prediction", "0", FCVAR_ARCHIVE);
+    safeMode=gEngfuncs.pfnRegisterVariable("sbxtma_safe_mode", "1", FCVAR_ARCHIVE);
+    addonVersion=gEngfuncs.pfnRegisterVariable("sbxtma_version", "2.0.0", 0);
 }
 } // namespace
 
@@ -310,16 +341,17 @@ void IPluginsV4::LoadEngine(cl_enginefunc_t* funcs) {
     registerVariables();
 }
 void IPluginsV4::LoadClient(cl_exportfuncs_t* exports) {
-    if (!g_pMetaHookAPI || !exports || movementHook || redrawHook) return;
-    if (!exports->HUD_PlayerMove || !exports->HUD_Redraw) return;
-    // MetaHook откладывает хуки до загрузки всех плагинов.
-    movementHook = g_pMetaHookAPI->InlineHook(
-        reinterpret_cast<void*>(exports->HUD_PlayerMove),
-        reinterpret_cast<void*>(&onMove), reinterpret_cast<void**>(&originalMovement));
-    redrawHook = g_pMetaHookAPI->InlineHook(
-        reinterpret_cast<void*>(exports->HUD_Redraw),
-        reinterpret_cast<void*>(&onRedraw), reinterpret_cast<void**>(&originalRedraw));
-    if (!movementHook || !redrawHook) removeHooks();
+    if(!exports || hookedExports) return;
+    // Never mutate client executable code: only swap the public callback table.
+    if(!exports->HUD_PlayerMove || !exports->HUD_Redraw ||
+       !exports->HUD_Shutdown) return;
+    hookedExports=exports;
+    originalMovement=exports->HUD_PlayerMove;
+    originalRedraw=exports->HUD_Redraw;
+    originalShutdown=exports->HUD_Shutdown;
+    exports->HUD_PlayerMove=&onMove;
+    exports->HUD_Redraw=&onRedraw;
+    exports->HUD_Shutdown=&onClientShutdown;
 }
 void IPluginsV4::Shutdown() { removeHooks(); }
 void IPluginsV4::ExitGame(int) { removeHooks(); }

@@ -1,7 +1,7 @@
 name: Build independent SvenBXT addons
 on:
   push:
-    branches: [master, 'feat/**']
+    branches: [master, 'feat/**', 'fix/**']
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -13,10 +13,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Fetch official MetaHook SDK
-        run: git clone --depth 1 https://github.com/MetaHookSv/MetaHook.git metahook-sdk
+        run: |
+          git clone --depth 1 https://github.com/MetaHookSv/MetaHook.git metahook-sdk
+          git clone --depth 1 https://github.com/MetaHookSv/VGUI2Extension.git vgui2extension-sdk
       - name: Configure both independent DLLs
         shell: pwsh
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A Win32 -DMETAHOOK_SDK_DIR="$env:GITHUB_WORKSPACE/metahook-sdk"
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A Win32 -DMETAHOOK_SDK_DIR="$env:GITHUB_WORKSPACE/metahook-sdk" -DVGUI2EXTENSION_SDK_DIR="$env:GITHUB_WORKSPACE/vgui2extension-sdk"
       - name: Build DLLs
         run: cmake --build build --config Release --parallel 2
       - name: Verify both DLLs
