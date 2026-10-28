@@ -64,6 +64,9 @@ bool msgHooksInstalled = false;
 bool settingsRegistered = false;
 bool colorCommandRegistered = false;
 bool safeCommandsRegistered = false;
+struct RegisteredCvar { const char* name; cvar_t* ptr; };
+std::array<RegisteredCvar,256> registeredCVars{};
+size_t registeredCount=0, failedRegistrationCount=0;
 bool hudSessionActive=false;
 bool nativeHooksEnabled=false;
 cl_exportfuncs_t* pendingExports=nullptr;
@@ -298,8 +301,14 @@ int onArmor(const char* name, int length, void* bytes) {
 }
 
 void reg(cvar_t*& dest,const char* name,const char* value) {
-    if (gEngfuncs.pfnRegisterVariable)
-        dest=gEngfuncs.pfnRegisterVariable(name,value,FCVAR_ARCHIVE);
+    dest=gEngfuncs.pfnRegisterVariable ?
+        gEngfuncs.pfnRegisterVariable(name,value,FCVAR_ARCHIVE) : nullptr;
+    if(!dest) {
+        ++failedRegistrationCount;
+        addon_log::write("hudedit","CVar registration returned NULL");
+    }
+    if(registeredCount<registeredCVars.size())
+        registeredCVars[registeredCount++]={name,dest};
 }
 void registerGroup(HudGroup& group,const char* key,bool defaultEnabled,
                    const char* left,const char* top,const char* width,const char* height) {
@@ -322,7 +331,10 @@ void settings() {
     reg(active,"hudedit_enabled","1");
     addon_log::write("hudedit","settings: base CVars entered");
     cvar_t* version=nullptr;
-    version=gEngfuncs.pfnRegisterVariable?gEngfuncs.pfnRegisterVariable("hudedit_version","2.1.0",0):nullptr;
+    version=gEngfuncs.pfnRegisterVariable?gEngfuncs.pfnRegisterVariable("hudedit_version","2.2.0",0):nullptr;
+    if(registeredCount<registeredCVars.size())
+        registeredCVars[registeredCount++]={"hudedit_version",version};
+    if(!version) ++failedRegistrationCount;
     reg(r,"hudedit_r","100"); reg(g,"hudedit_g","130"); reg(b,"hudedit_b","200");
     reg(lowR,"hudedit_critical_r","250");reg(lowG,"hudedit_critical_g","25");
     reg(lowB,"hudedit_critical_b","45");reg(critical,"hudedit_critical_hp","25");
@@ -397,7 +409,9 @@ void settings() {
     reg(chOutlineRed,"hudedit_crosshair_outline_r","0");
     reg(chOutlineGreen,"hudedit_crosshair_outline_g","0");
     reg(chOutlineBlue,"hudedit_crosshair_outline_b","0");
-    addon_log::write("hudedit","settings complete");
+    addon_log::write("hudedit",failedRegistrationCount==0?
+        "settings complete: all CVar registrations returned pointers":
+        "settings complete: some CVar registrations returned NULL");
 }
 bool canDraw() {
     return yes(active) && gEngfuncs.pfnGetScreenInfo &&
@@ -749,15 +763,65 @@ void disableNativeHooks() {
 namespace {
 // Initialize advanced cvars ONLY after Sven Co-op main menu has opened,
 // and the player explicitly enters hudedit_init.
+
+void hudeditStatus() {
+    const bool init=settingsRegistered;
+    addon_log::write("hudedit",init ?
+        "STATUS: settingsRegistered=1" : "STATUS: settingsRegistered=0");
+    size_t missing=0;
+    const char* keys[]={"hudedit_version","hudedit_inventory_x","hudedit_inventory_visible",
+        "hudedit_flashlight_r","hudedit_speed_x","hudedit_crosshair_size"};
+    if(gEngfuncs.Con_Printf)
+        gEngfuncs.Con_Printf("HUD Edit: init %s; CVars=%u; failures=%u; overlay=%s\n",
+            init?"complete":"NOT complete",
+            static_cast<unsigned>(registeredCount),
+            static_cast<unsigned>(failedRegistrationCount),
+            hudSessionActive?"on":"off");
+    for(const char* name:keys) {
+        cvar_t* enginePtr=gEngfuncs.pfnGetCvarPointer ?
+            gEngfuncs.pfnGetCvarPointer(name) : nullptr;
+        cvar_t* storedPtr=nullptr;
+        for(size_t i=0;i<registeredCount;++i) {
+            if(registeredCVars[i].name &&
+               std::strcmp(name,registeredCVars[i].name)==0) {
+                storedPtr=registeredCVars[i].ptr;
+                break;
+            }
+        }
+        if(!enginePtr || !storedPtr) ++missing;
+        if(gEngfuncs.Con_Printf)
+            gEngfuncs.Con_Printf("HUD Edit: %-31s registered=%s engine_lookup=%s\n",
+                name,storedPtr?"yes":"NO",enginePtr?"yes":"NO");
+        if(!enginePtr || !storedPtr)
+            addon_log::write("hudedit","STATUS: missing registered CVar or engine lookup");
+    }
+    if(gEngfuncs.Con_Printf)
+        gEngfuncs.Con_Printf(missing ?
+            "HUD Edit: missing CVars; send SvenBXT_addons_boot.log\n" :
+            "HUD Edit: core CVars found. Use hudedit_start for overlay.\n");
+}
+void hudeditHelp() {
+    if(gEngfuncs.Con_Printf)
+        gEngfuncs.Con_Printf(
+            "HUD Edit: hudedit_init, hudedit_status, hudedit_help, hudedit_color R G B, hudedit_start, hudedit_stop\n"
+            "Inventory: hudedit_inventory_x/y and hudedit_inventory_visible 0/1\n"
+            "Flashlight: hudedit_flashlight_enabled 1, hudedit_flashlight_use_theme 0, hudedit_flashlight_r/g/b\n");
+}
 void lazyInitialize() {
     addon_log::write("hudedit","hudedit_init invoked");
+    if(!settingsRegistered) {
+        registeredCount=0;
+        failedRegistrationCount=0;
+    }
     if(!settingsRegistered) {
         if(!gEngfuncs.pfnRegisterVariable) {
             addon_log::write("hudedit","hudedit_init no CVar registration API");
             return;
         }
         settings();
-        settingsRegistered=true;
+        settingsRegistered=(failedRegistrationCount==0);
+        if(!settingsRegistered)
+            addon_log::write("hudedit","ERROR: incomplete CVar setup, retry hudedit_init");
     }
     if(!colorCommandRegistered && gEngfuncs.pfnAddCommand) {
         addon_log::write("hudedit","hudedit_init before extra commands");
@@ -770,7 +834,10 @@ void lazyInitialize() {
         colorCommandRegistered=true;
         addon_log::write("hudedit","hudedit_init extra commands complete");
     }
-    addon_log::write("hudedit","hudedit_init completed");
+    addon_log::write("hudedit",settingsRegistered ?
+        "hudedit_init completed: CVars registered" :
+        "hudedit_init completed: CVAR REGISTRATION INCOMPLETE");
+    hudeditStatus();
 }
 } // namespace
 
@@ -793,10 +860,12 @@ void IPluginsV4::LoadClient(cl_exportfuncs_t* exports) {
     addon_log::write("hudedit","LoadClient entry");
     pendingExports=exports;
     if(!safeCommandsRegistered && gEngfuncs.pfnAddCommand) {
-        addon_log::write("hudedit","LoadClient before hudedit_init command");
+        addon_log::write("hudedit","LoadClient before diagnostic commands");
         gEngfuncs.pfnAddCommand("hudedit_init",&lazyInitialize);
+        gEngfuncs.pfnAddCommand("hudedit_status",&hudeditStatus);
+        gEngfuncs.pfnAddCommand("hudedit_help",&hudeditHelp);
         safeCommandsRegistered=true;
-        addon_log::write("hudedit","LoadClient hudedit_init command registered");
+        addon_log::write("hudedit","LoadClient init/status/help commands registered");
     }
     addon_log::write("hudedit","LoadClient completed (no engine hooks)");
 }
@@ -812,5 +881,5 @@ void IPluginsV4::Shutdown() {
     cleanup();
     pendingExports=nullptr;hudSessionActive=false;
 }
-const char* IPluginsV4::GetVersion() { return "2.1.0-safe"; }
+const char* IPluginsV4::GetVersion() { return "2.2.0-diagnostic"; }
 EXPOSE_SINGLE_INTERFACE(IPluginsV4,IPluginsV4,METAHOOK_PLUGIN_API_VERSION_V4);
