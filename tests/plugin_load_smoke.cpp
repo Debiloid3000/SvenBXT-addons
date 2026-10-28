@@ -1,5 +1,6 @@
 #include <metahook.h>
 #include <IPlugins.h>
+#include <cdll_export.h>
 #include <cvardef.h>
 #include <windows.h>
 #include <cstdio>
@@ -46,7 +47,13 @@ int main(int argc,char** argv) {
         engine.pfnAddCommand=&cmd;
         p->Init(nullptr,nullptr,nullptr);
         p->LoadEngine(&engine);
-        p->LoadClient(nullptr);
+        cl_exportfuncs_t fakeExports={};
+        cl_exportfuncs_t snapshot=fakeExports;
+        p->LoadClient(&fakeExports);
+        if(std::memcmp(&snapshot,&fakeExports,sizeof(fakeExports))!=0) {
+            std::fprintf(stderr,"Plugin modified client callbacks during startup: %s\n",argv[i]);
+            return 15;
+        }
         const bool isHud=std::strstr(argv[i],"HudEdit")!=nullptr;
         const char* command=isHud?"hudedit_start":"sbxtma_start";
         const char* cvar=isHud?"hudedit_inventory_x":"sbxtma_safe_mode";
