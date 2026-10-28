@@ -1,3 +1,47 @@
+# HUD Edit / Movement v2.2 — диагностика команд и безопасная инициализация
+
+**Что показывает реальный лог:** вызов `hudedit_init` уже выполнялся, настройки доходили до `settings complete` и дополнительные команды регистрировались. Поэтому `Unknown command` для другой настройки нельзя объяснять только отсутствием `hudedit_init`. Новая диагностика проверяет ещё и доступность регистраций через engine CVar lookup.
+
+### Проверить HUD Edit в игре
+
+```cfg
+hudedit_status
+hudedit_init
+hudedit_status
+hudedit_version
+hudedit_inventory_x
+hudedit_help
+```
+
+Команда `hudedit_status` показывает в консоли, были ли возвращены указатели при регистрации `hudedit_inventory_x`, `hudedit_inventory_visible`, `hudedit_flashlight_r`, `hudedit_speed_x` и `hudedit_crosshair_size`, и видит ли эти CVars сам движок. Если `registered=yes`, но `engine_lookup=NO`, нужно исследовать совместимость CVar API с реальным билдом Sven Co-op. Если и `hudedit_status` неизвестна — запущена старая DLL или плагин вообще не загружен. Все этапы доступны также в `%TEMP%\SvenBXT_addons_boot.log`.
+
+Если консоль пишет `Unknown command` на `hudedit_inventory_x` **при успешном** `hudedit_init`, можно временно изменить значение через плагин:
+
+```cfg
+hudedit_set inventory_x 200
+hudedit_set inventory_y 100
+hudedit_set inventory_visible 1
+hudedit_set flashlight_r 0
+hudedit_set flashlight_g 255
+hudedit_set flashlight_b 255
+```
+
+`hudedit_set` использует уже зарегистрированный CVar, а не зависит только от обычного разрешения команды в консоли Sven Co-op. Если движок не применяет изменение по имени, значение меняется в памяти плагина на текущий сеанс; в таком случае **не гарантируется сохранение в конфиг**. Это диагностический обходной путь, не подтверждённое исправление причины.
+После успешной диагностики выполняйте `hudedit_start` для включения собственного HUD. Это отдельный этап: зарегистрированные CVars **не означают** включённые хуки отрисовки. Не используйте `hudedit_native_on` до подтверждения стабильности игры; штатные иконки/фонарик/название главы могут рисоваться вне GoldSrc API.
+
+### Проверить Movement без повторного зависания на LoadEngine
+
+```cfg
+sbxtma_status
+sbxtma_init
+sbxtma_status
+sbxtma_version
+sbxtma_start
+```
+
+Ранний `LoadEngine` больше не регистрирует 12 Movement CVars: они включаются вручную после запуска через `sbxtma_init`. Сохраняется безопасный `sbxtma_safe_mode 1`. Проверка в тестовой Win32 среде не равна запуску реального Sven Co-op — до получения нового лога нельзя объявлять проблему устранённой.
+
+---
 # HUD Edit: исправление раннего зависания при запуске Sven Co-op
 
 Из лога пользователя видно: `[hudedit] V4 Init`, `[hudedit] LoadEngine begin` и **нет** `LoadEngine completed`. Проблема локализована в регистрации движковых команд/CVar во время раннего `LoadEngine` (точный сбой внутри регистратора пока не доказан). В предыдущей реализации динамические имена `hudedit_inventory_*`, `hudedit_flashlight_*`, `hudedit_chapter_*` формировались на стеке и переставали существовать после `registerGroup`. Теперь они хранятся в стабильной памяти плагина.
