@@ -76,7 +76,8 @@ int main(int argc,char** argv) {
             commands.at("hudedit_status")();
             commands.at("hudedit_init")();
             commands.at("hudedit_status")();
-            if(!commands.count("hudedit_start") || !vars.count("hudedit_inventory_x") ||
+            if(!commands.count("hudedit_start") || !commands.count("hudedit_set") ||
+               !vars.count("hudedit_inventory_x") ||
                !vars.count("hudedit_inventory_visible") ||
                !vars.count("hudedit_flashlight_y") ||
                !lookup("hudedit_crosshair_size")) {
