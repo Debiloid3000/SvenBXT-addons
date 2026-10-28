@@ -3,6 +3,9 @@
 #include <metahook.h>
 #include <cvardef.h>
 #include <IVGUI2Extension.h>
+#include <ISurface2.h>
+#include <IScheme2.h>
+#include <IInput2.h>
 #include <vgui_controls/PropertyPage.h>
 #include <vgui_controls/Label.h>
 #include <vgui_controls/CvarTextEntry.h>
@@ -16,6 +19,10 @@
 #include <cstdio>
 
 extern cl_enginefunc_t gEngfuncs;
+// Shared VGUI controls runtime uses these three extension adapter pointers.
+vgui::ISurface2* g_pVGuiSurface2=nullptr;
+vgui::ISchemeManager2* g_pVGuiSchemeManager2=nullptr;
+vgui::IInput2* g_pVGuiInput2=nullptr;
 
 namespace {
 IVGUI2Extension* extension = nullptr;
@@ -123,6 +130,13 @@ void HudEditOptions_Register() {
     if(!factory) return;
     auto* candidate=reinterpret_cast<IVGUI2Extension*>(factory(VGUI2_EXTENSION_INTERFACE_VERSION,nullptr));
     if(!candidate) return;
+    auto* surface=reinterpret_cast<vgui::ISurface2*>(factory(VGUI_SURFACE2_INTERFACE_VERSION,nullptr));
+    auto* scheme=reinterpret_cast<vgui::ISchemeManager2*>(factory(VGUI_SCHEME2_INTERFACE_VERSION,nullptr));
+    auto* input=reinterpret_cast<vgui::IInput2*>(factory(VGUI_INPUT2_INTERFACE_VERSION,nullptr));
+    if(!surface || !scheme || !input) return;
+    g_pVGuiSurface2=surface;
+    g_pVGuiSchemeManager2=scheme;
+    g_pVGuiInput2=input;
     extension=candidate;
     extension->RegisterGameUIOptionDialogCallbacks(&optionsCallbacks);
 }
@@ -130,4 +144,7 @@ void HudEditOptions_Unregister() {
     if(!extension) return;
     extension->UnregisterGameUIOptionDialogCallbacks(&optionsCallbacks);
     extension=nullptr;
+    g_pVGuiSurface2=nullptr;
+    g_pVGuiSchemeManager2=nullptr;
+    g_pVGuiInput2=nullptr;
 }
