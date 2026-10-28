@@ -91,7 +91,7 @@ void transform(int& red,int& green,int& blue) {
     else return;
     red=c.r;green=c.g;blue=c.b;
 }
-void onSprite(HSPRITE sprite, int red, int green, int blue) {
+void onSprite(int sprite, int red, int green, int blue) {
     transform(red,green,blue);
     if (oldSprite) oldSprite(sprite,red,green,blue);
 }
