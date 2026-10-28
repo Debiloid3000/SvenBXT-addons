@@ -48,4 +48,6 @@ install(TARGETS SvenBXTHudEdit RUNTIME DESTINATION svencoop/metahook/plugins)
 
 # DLL import and factory tests run before uploading the release assets.
 add_executable(SvenBXTLoadSmoke tests/plugin_load_smoke.cpp)
+target_include_directories(SvenBXTLoadSmoke PRIVATE ${_svenbxt_include_dirs})
+target_compile_definitions(SvenBXTLoadSmoke PRIVATE WIN32 _WINDOWS NOMINMAX NO_MALLOC_OVERRIDE)
 target_compile_options(SvenBXTLoadSmoke PRIVATE /W3 /utf-8)
