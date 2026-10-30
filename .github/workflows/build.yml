@@ -13,11 +13,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Fetch official MetaHook SDK
+        shell: pwsh
         run: |
-          git clone --depth 1 https://github.com/MetaHookSv/MetaHook.git metahook-sdk
+          git init metahook-sdk
+          git -C metahook-sdk remote add origin https://github.com/MetaHookSv/MetaHook.git
+          git -C metahook-sdk fetch --depth 1 origin 2eb77674843d682c2425c967d29ad538793c0b9b
+          git -C metahook-sdk checkout --detach FETCH_HEAD
+          git init vgui2extension-sdk
+          git -C vgui2extension-sdk remote add origin https://github.com/MetaHookSv/VGUI2Extension.git
+          git -C vgui2extension-sdk fetch --depth 1 origin 784a92cec9d5fa16f76b8532e7e1179b3a7d57a1
+          git -C vgui2extension-sdk checkout --detach FETCH_HEAD
       - name: Configure both independent DLLs
         shell: pwsh
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A Win32 -DMETAHOOK_SDK_DIR="$env:GITHUB_WORKSPACE/metahook-sdk"
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A Win32 -DMETAHOOK_SDK_DIR="$env:GITHUB_WORKSPACE/metahook-sdk" -DVGUI2EXTENSION_SDK_DIR="$env:GITHUB_WORKSPACE/vgui2extension-sdk"
       - name: Build DLLs
         run: cmake --build build --config Release --parallel 2
       - name: Verify both DLLs
@@ -26,11 +34,8 @@ jobs:
           foreach ($dll in @("SvenBXTMovement.dll", "SvenBXTHudEdit.dll")) {
             if (!(Test-Path "build/Release/$dll")) { throw "Missing $dll" }
           }
-      - name: Verify Windows x86 DLL imports and MetaHook V4 factory
-        shell: pwsh
-        run: |
-          & "build/Release/SvenBXTLoadSmoke.exe" "build/Release/SvenBXTMovement.dll" "build/Release/SvenBXTHudEdit.dll"
-          if ($LASTEXITCODE -ne 0) { throw "DLL loader smoke test failed: $LASTEXITCODE" }
+      - name: Test x86 client startup, outgoing movement, HUD and callback chains
+        run: ctest --test-dir build -C Release --output-on-failure
       - uses: actions/upload-artifact@v4
         with:
           name: SvenBXTMovement-Windows-x86
@@ -64,6 +69,8 @@ jobs:
         run: |
           c++ -std=c++17 -O2 -Wall -Wextra -pedantic -Isrc tests/movement_math_tests.cpp -o math_tests
           ./math_tests
+          c++ -std=c++17 -O2 -Wall -Wextra -pedantic -Isrc tests/movement_assist_tests.cpp -o assist_tests
+          ./assist_tests
           c++ -std=c++17 -O2 -Wall -Wextra -pedantic -Isrc tests/hudedit_layout_tests.cpp -o hudedit_tests
           ./hudedit_tests
           c++ -std=c++17 -O2 -Wall -Wextra -pedantic -Isrc tests/hudedit_regions_tests.cpp -o hudedit_regions_tests
