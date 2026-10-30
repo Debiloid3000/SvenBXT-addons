@@ -123,6 +123,16 @@ void run(const char* movementPath,const char* hudPath,bool reverse) {
     require(lookup("sbxtma_mode")->value==2,"default movement mode is not Assist");
     require(lookup("sbxtma_allow_online")->value==1,"Sven multiplayer disabled by default");
     require(lookup("hudedit_speed")->value==0,"HUD Edit duplicated existing speedometer");
+    // Simulate the previous release's archived diagnostic defaults, applied
+    // by startup configs between HUD_Init and the first HUD_Frame.
+    setValue("sbxtma_safe_mode",1);setValue("sbxtma_mode",1);
+    setValue("sbxtma_allow_online",0);setValue("sbxtma_prediction",0);
+    e.HUD_Frame(2);
+    require(lookup("sbxtma_mode")->value==2 && lookup("sbxtma_allow_online")->value==1 &&
+        lookup("sbxtma_prediction")->value==1,"old diagnostic defaults did not migrate");
+    setValue("sbxtma_mode",1);e.HUD_Frame(2);
+    require(lookup("sbxtma_mode")->value==1,"migration overwrote a later user preference");
+    setValue("sbxtma_mode",2);
     const size_t registrations=vars.size(),commandCount=commands.size();
     command("hudedit_init");command("sbxtma_init");command("hudedit_status");command("sbxtma_status");
     require(vars.size()==registrations && commands.size()==commandCount,"init aliases not idempotent");
@@ -181,8 +191,23 @@ void run(const char* movementPath,const char* hudPath,bool reverse) {
     vars.clear();commands.clear();
     std::printf("PASS: automatic startup, outgoing commands, stop/restart, reload (%s order)\n",reverse?"HUD/Movement":"Movement/HUD");
 }
+void testDeferredOptions(const char* hudPath,const char* stubPath) {
+    auto stub=LoadLibraryA(stubPath);require(stub!=nullptr,"load VGUI test provider");
+    auto count=reinterpret_cast<int(*)()>(GetProcAddress(stub,"TestRegistrationCount"));
+    auto open=reinterpret_cast<void(*)()>(GetProcAddress(stub,"TestOpenOptions"));
+    require(count && open,"VGUI test provider exports");
+    auto plugin=load(hudPath);
+    cl_enginefunc_t bootstrap={};auto exports=clientExports();
+    plugin.api->Init(nullptr,nullptr,nullptr);plugin.api->LoadEngine(&bootstrap);plugin.api->LoadClient(&exports);
+    require(count()==1,"Options callbacks not registered automatically");
+    open(); // No VGUI runtime: must return without touching the fake context.
+    plugin.api->Shutdown();require(count()==0,"Options callback left in provider after shutdown");
+    FreeLibrary(plugin.module);FreeLibrary(stub);
+    std::printf("PASS: deferred Options when extension exists but VGUI runtime is absent\n");
+}
 } // namespace
 int main(int argc,char** argv) {
-    if(argc!=3) {std::fprintf(stderr,"Usage: plugin_load_smoke Movement.dll HudEdit.dll\n");return 2;}
-    run(argv[1],argv[2],false);run(argv[1],argv[2],true);return 0;
+    if(argc!=4) {std::fprintf(stderr,"Usage: plugin_load_smoke Movement.dll HudEdit.dll VGUIStub.dll\n");return 2;}
+    run(argv[1],argv[2],false);run(argv[1],argv[2],true);
+    testDeferredOptions(argv[2],argv[3]);return 0;
 }

@@ -26,6 +26,7 @@ cvar_t *mode=nullptr, *online=nullptr, *notify=nullptr, *enabledCvar=nullptr;
 cvar_t *edgeEnabled=nullptr, *jumpEnabled=nullptr, *strafeEnabled=nullptr;
 cvar_t *pixelEnabled=nullptr, *boostEnabled=nullptr, *triggerWidth=nullptr;
 cvar_t *predictionEnabled=nullptr;
+cvar_t *configVersion=nullptr, *legacySafeMode=nullptr;
 MovementState state;
 AssistController controller;
 float sampledAt = -1, lastFrameTime = -1;
@@ -50,7 +51,7 @@ public:
     void draw() const {
         if (!active() || !enabled(notify) || !gEngfuncs.pfnFillRGBA ||
             !gEngfuncs.pfnDrawConsoleString) return;
-        int y=140;
+        int y=200;
         for (const auto& e:entries) {
             if(e.expire<=now()) continue;
             gEngfuncs.pfnFillRGBA(16,y,269,43,13,18,29,192);
@@ -103,9 +104,14 @@ void initializeSettings() {
     boostEnabled=reg("sbxtma_objectboost","0");
     triggerWidth=reg("sbxtma_trigger_width","0");
     predictionEnabled=reg("sbxtma_prediction","1");
+    configVersion=reg("sbxtma_config_version","0");
+    // Read old archived diagnostic settings for a one-time upgrade. This
+    // compatibility CVar is no longer an execution gate for movement.
+    legacySafeMode=reg("sbxtma_safe_mode","-1");
     reg("sbxtma_version","2.3.0",0);
     settingsReady=enabledCvar && mode && online && notify && edgeEnabled && jumpEnabled &&
-        strafeEnabled && pixelEnabled && boostEnabled && triggerWidth && predictionEnabled;
+        strafeEnabled && pixelEnabled && boostEnabled && triggerWidth && predictionEnabled &&
+        configVersion && legacySafeMode;
     if(gEngfuncs.pfnAddCommand) {
         // Backward-compatible commands. Normal startup never needs these.
         gEngfuncs.pfnAddCommand("sbxtma_init",&initializeSettings);
@@ -218,6 +224,13 @@ void onCreateMove(float dt,usercmd_t* cmd,int inGame) {
     if(events&Edge) notifications.add("EDGEBUG","Predicted ledge contact");
     if(events&Jumpbug) notifications.add("JUMPBUG","Predicted landing window");
     if(events&Pixelsurf) notifications.add("PIXELSURF","Predicted wall micro-contact");
+    if(triggerWidth && triggerWidth->value>0) {
+        const float fps=trigger_skip_fps(state.velocity.speed2d(),triggerWidth->value);
+        if(fps>=4) {
+            char message[64];std::snprintf(message,sizeof(message),"~%.0f FPS (estimate)",fps);
+            notifications.add("TRIGGER SKIP",message);
+        }
+    }
     const bool boost=cfg.mode>=2 && (!state.multiplayer || cfg.online) &&
         state.pushable && (enabled(boostEnabled)||boostHeld);
     if(boost && !fpsLimited && gEngfuncs.pfnGetCvarPointer && gEngfuncs.Cvar_SetValue) {
@@ -234,6 +247,17 @@ int onRedraw(float t,int intermission) {
 }
 void onFrame(double t) {
     if(original.HUD_Frame) original.HUD_Frame(t);
+    // The first frame runs after startup configs. Upgrade only the old
+    // diagnostic defaults; later user changes remain authoritative.
+    if(settingsReady && configVersion->value<1 && gEngfuncs.Cvar_SetValue) {
+        if(enabled(legacySafeMode)) {
+            if(mode->value==1) gEngfuncs.Cvar_SetValue("sbxtma_mode",2);
+            if(online->value==0) gEngfuncs.Cvar_SetValue("sbxtma_allow_online",1);
+            if(predictionEnabled->value==0) gEngfuncs.Cvar_SetValue("sbxtma_prediction",1);
+        }
+        gEngfuncs.Cvar_SetValue("sbxtma_safe_mode",0);
+        gEngfuncs.Cvar_SetValue("sbxtma_config_version",1);
+    }
     const float time=now();
     if(!active() || (lastFrameTime>=0 && time<lastFrameTime) ||
        sampledAt<0 || time-sampledAt>.5f) {

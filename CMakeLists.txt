@@ -65,6 +65,11 @@ add_executable(SvenBXTLoadSmoke tests/plugin_load_smoke.cpp)
 target_include_directories(SvenBXTLoadSmoke PRIVATE ${_svenbxt_include_dirs})
 target_compile_definitions(SvenBXTLoadSmoke PRIVATE WIN32 _WINDOWS NOMINMAX NO_MALLOC_OVERRIDE)
 target_compile_options(SvenBXTLoadSmoke PRIVATE /W3 /utf-8)
+add_library(SvenBXTVguiStub SHARED tests/vgui_extension_stub.cpp tests/vgui_extension_stub.def)
+target_include_directories(SvenBXTVguiStub PRIVATE ${_svenbxt_include_dirs}
+    "${VGUI2EXTENSION_SDK_DIR}/include/Interface")
+target_compile_definitions(SvenBXTVguiStub PRIVATE WIN32 _WINDOWS NOMINMAX NO_MALLOC_OVERRIDE)
+set_target_properties(SvenBXTVguiStub PROPERTIES OUTPUT_NAME VGUI2Extension)
 enable_testing()
 add_test(NAME client_lifecycle COMMAND SvenBXTLoadSmoke
-    "$<TARGET_FILE:SvenBXTMovement>" "$<TARGET_FILE:SvenBXTHudEdit>")
+    "$<TARGET_FILE:SvenBXTMovement>" "$<TARGET_FILE:SvenBXTHudEdit>" "$<TARGET_FILE:SvenBXTVguiStub>")

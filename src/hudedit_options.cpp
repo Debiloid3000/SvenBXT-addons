@@ -32,7 +32,7 @@ bool controlsReady=false;
 CreateInterfaceFn moduleFactory(HMODULE module) {
     return module?reinterpret_cast<CreateInterfaceFn>(GetProcAddress(module,"CreateInterface")):nullptr;
 }
-void* fileSystemFactory(const char* version,int*) {
+IBaseInterface* fileSystemFactory(const char* version,int*) {
     return g_pInterface && !std::strcmp(version,FILESYSTEM_INTERFACE_VERSION)?g_pInterface->FileSystem:nullptr;
 }
 bool initializeControls() {
@@ -59,7 +59,7 @@ float value(const char* name,float fallback=0) {
     return c?c->value:fallback;
 }
 int clamped(const char* name,int fallback,int low,int high) {
-    return std::max(low,std::min(high,static_cast<int>(value(name,static_cast<float>(fallback)))));
+    return (std::max)(low,(std::min)(high,static_cast<int>(value(name,static_cast<float>(fallback)))));
 }
 class SettingsPage : public vgui::PropertyPage {
     DECLARE_CLASS_SIMPLE(SettingsPage,vgui::PropertyPage);
