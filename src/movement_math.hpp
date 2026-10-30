@@ -18,7 +18,11 @@ inline float radians(float a){return a*0.01745329251994329577f;}
 inline float degrees(float a){return a*57.29577951308232f;}
 inline float ideal_strafe_angle(float wishspeed,float airaccel,float dt,float speed){
     if(speed<1.f||wishspeed<=0||dt<=0)return 0;
-    return degrees(std::acos(clampf((wishspeed-airaccel*wishspeed*dt)/speed,-1.f,1.f)));
+    // PM_AirAccelerate caps wishspd at 30, but uses the uncapped wishspeed
+    // for acceleration. The optimum projection never needs to be negative.
+    const float projection=std::max(0.f,std::min(30.f,wishspeed)-
+                                         std::max(0.f,airaccel)*wishspeed*dt);
+    return degrees(std::acos(clampf(projection/speed,0.f,1.f)));
 }
 inline float trigger_skip_fps(float speed,float width){
     if(speed<=1||width<=0.01f)return 0;

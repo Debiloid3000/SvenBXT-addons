@@ -11,8 +11,8 @@
 #include "hudedit_layout.hpp"
 #include "hudedit_regions.hpp"
 #include "startup_diagnostics.hpp"
-// VGUI Options frontend remains in the repository as experimental source,
-// but is not linked into the safe startup DLL until its runtime is validated.
+void HudEditOptions_Register();
+void HudEditOptions_Unregister();
 
 // SvenBXTHudEdit — отдельный MetaHookSv V4-плагин.
 // Настройки палитры, замены элементов HUD, координат и спидометра.
@@ -37,11 +37,7 @@ using ScaleFn = void (*)(int*, int*, int*, int);
 using ConsoleFn = decltype(gEngfuncs.pfnDrawConsoleString);
 using FillFn = decltype(gEngfuncs.pfnFillRGBA);
 
-hook_t* redrawHook = nullptr;
-hook_t* initHook = nullptr;
-hook_t* viewHook = nullptr;
 hook_t* spriteHook = nullptr;
-hook_t* scaleHook = nullptr;
 hook_t* drawHook = nullptr;
 hook_t* drawAdditiveHook = nullptr;
 hook_t* drawHolesHook = nullptr;
@@ -64,16 +60,16 @@ pfnUserMsgHook oldArmorMessage = nullptr;
 bool msgHooksInstalled = false;
 bool settingsRegistered = false;
 bool colorCommandRegistered = false;
-bool safeCommandsRegistered = false;
+
 struct RegisteredCvar { const char* name; cvar_t* ptr; };
 std::array<RegisteredCvar,256> registeredCVars{};
 size_t registeredCount=0, failedRegistrationCount=0;
 bool hudSessionActive=false;
 bool nativeHooksEnabled=false;
-cl_exportfuncs_t* pendingExports=nullptr;
+cl_exportfuncs_t originalCallbacks={};
 using ShutdownFn=void (*)();
 ShutdownFn originalShutdown=nullptr;
-bool wasEverActivated=false;
+
 bool insideHudRedraw = false;
 int cachedScreenHeight = 0;
 int cachedScreenWidth = 0;
@@ -95,8 +91,7 @@ cvar_t *speedR=nullptr, *speedG=nullptr, *speedB=nullptr;
 cvar_t *speedLabel=nullptr;
 cvar_t *opacity=nullptr;
 cvar_t *forceAllColors=nullptr;
-cvar_t *inventoryBottom=nullptr, *inventoryRegionX=nullptr, *inventoryRegionY=nullptr;
-cvar_t *inventoryRegionW=nullptr, *inventoryRegionH=nullptr, *inventoryMargin=nullptr;
+cvar_t *inventoryBottom=nullptr, *inventoryMargin=nullptr;
 struct HudGroup {
     cvar_t *enabled=nullptr,*visible=nullptr,*x=nullptr,*y=nullptr,*regionX=nullptr,*regionY=nullptr,*regionW=nullptr,*regionH=nullptr;
     cvar_t *useTheme=nullptr,*red=nullptr,*green=nullptr,*blue=nullptr;
@@ -153,7 +148,7 @@ RGB currentHealthColor() {
         ? lowColor() : mainColor();
 }
 void transform(int& red,int& green,int& blue) {
-    if (!yes(active)) return;
+    if (!hudSessionActive || !insideHudRedraw || drawingCustomOverlay || !yes(active)) return;
     RGB c;
     if (yes(forceAllColors) || globalRainbow()) c=mainColor();
     else if (red==100 && green==130 && blue==200) c=mainColor();
@@ -302,8 +297,9 @@ int onArmor(const char* name, int length, void* bytes) {
 }
 
 void reg(cvar_t*& dest,const char* name,const char* value) {
-    dest=gEngfuncs.pfnRegisterVariable ?
-        gEngfuncs.pfnRegisterVariable(name,value,FCVAR_ARCHIVE) : nullptr;
+    dest=gEngfuncs.pfnGetCvarPointer ? gEngfuncs.pfnGetCvarPointer(name) : nullptr;
+    if(!dest && gEngfuncs.pfnRegisterVariable)
+        dest=gEngfuncs.pfnRegisterVariable(name,value,FCVAR_ARCHIVE);
     if(!dest) {
         ++failedRegistrationCount;
         addon_log::write("hudedit","CVar registration returned NULL");
@@ -328,11 +324,11 @@ void registerGroup(HudGroup& group,const char* key,bool defaultEnabled,
     make(group.red,"r","255");make(group.green,"g","255");make(group.blue,"b","255");
 }
 void settings() {
-    addon_log::write("hudedit","settings begin (user-triggered)");
+    addon_log::write("hudedit","settings begin (automatic HUD_Init)");
     reg(active,"hudedit_enabled","1");
     addon_log::write("hudedit","settings: base CVars entered");
     cvar_t* version=nullptr;
-    version=gEngfuncs.pfnRegisterVariable?gEngfuncs.pfnRegisterVariable("hudedit_version","2.2.0",0):nullptr;
+    version=gEngfuncs.pfnRegisterVariable?gEngfuncs.pfnRegisterVariable("hudedit_version","2.3.0",0):nullptr;
     if(registeredCount<registeredCVars.size())
         registeredCVars[registeredCount++]={"hudedit_version",version};
     if(!version) ++failedRegistrationCount;
@@ -351,7 +347,7 @@ void settings() {
     reg(healthIX,"hudedit_health_icon_x","-1");reg(healthIY,"hudedit_health_icon_y","-1");
     reg(armorNX,"hudedit_armor_num_x","-1");reg(armorNY,"hudedit_armor_num_y","-1");
     reg(armorIX,"hudedit_armor_icon_x","-1");reg(armorIY,"hudedit_armor_icon_y","-1");
-    reg(speedEnable,"hudedit_speed","1");reg(speedX,"hudedit_speed_x","-1");
+    reg(speedEnable,"hudedit_speed","0");reg(speedX,"hudedit_speed_x","-1");
     reg(speedY,"hudedit_speed_y","-1");reg(speedStyle,"hudedit_speed_style","1");
     reg(speedScale,"hudedit_speed_scale","2");
     reg(speedTheme,"hudedit_speed_use_theme","1");
@@ -361,10 +357,6 @@ void settings() {
     reg(forceAllColors,"hudedit_all_colors","0");
     // Только меню выбора предметов сверху слева, остальные элементы не двигаем.
     reg(inventoryBottom,"hudedit_inventory_bottom","0");
-    reg(inventoryRegionX,"hudedit_inventory_region_x","0");
-    reg(inventoryRegionY,"hudedit_inventory_region_y","0");
-    reg(inventoryRegionW,"hudedit_inventory_region_w","210");
-    reg(inventoryRegionH,"hudedit_inventory_region_h","170");
     reg(inventoryMargin,"hudedit_inventory_margin","12");
     addon_log::write("hudedit","settings: before inventory group");
     registerGroup(inventory,"inventory",true,"0","0","210","170");
@@ -575,6 +567,7 @@ void onView(ref_params_t* params) {
     if (params) speed=std::hypot(params->simvel[0],params->simvel[1]);
 }
 int onRedraw(float t,int intermission) {
+    if(!hudSessionActive) return oldRedraw?oldRedraw(t,intermission):1;
     syncVisibility();
     cachedScreenHeight=0;
     if(gEngfuncs.pfnGetScreenInfo) {
@@ -590,115 +583,46 @@ int onRedraw(float t,int intermission) {
     if (!intermission) drawOverlay();
     return result;
 }
-void onHudInit() {
-    if(oldInit)oldInit();
-    if(!settingsRegistered) {
-        settings();
-        settingsRegistered=true;
-    }
-    if(!colorCommandRegistered && gEngfuncs.pfnAddCommand) {
-        gEngfuncs.pfnAddCommand("hudedit_color",&changeColorCommand);
-        colorCommandRegistered=true;
-    }
-    if(!msgHooksInstalled && g_pMetaHookAPI && g_pMetaHookAPI->HookUserMsg) {
-        oldHealthMessage=g_pMetaHookAPI->HookUserMsg("Health",&onHealth);
-        oldArmorMessage=g_pMetaHookAPI->HookUserMsg("Battery",&onArmor);
-        msgHooksInstalled=true;
-    }
-}
+void lazyInitialize();
+void startHud();
+void disableNativeHooks();
+void stopHud();
 void cleanup() {
-    addon_log::write("hudedit","cleanup");
+    stopHud();
+    HudEditOptions_Unregister();
+}
+void onHudInit() {
+    if(oldInit) oldInit();
+    lazyInitialize();
+    startHud();
+}
+void stopHud() {
+    hudSessionActive=false;
     restoreSettings();
-    // При выгрузке DLL нельзя оставлять указатели usermsg-хуков в нашей памяти.
-    if (msgHooksInstalled && g_pMetaHookAPI && g_pMetaHookAPI->HookUserMsg) {
-        if (oldHealthMessage) g_pMetaHookAPI->HookUserMsg("Health",oldHealthMessage);
-        if (oldArmorMessage) g_pMetaHookAPI->HookUserMsg("Battery",oldArmorMessage);
+    disableNativeHooks();
+    if(msgHooksInstalled && g_pMetaHookAPI && g_pMetaHookAPI->HookUserMsg) {
+        if(oldHealthMessage) g_pMetaHookAPI->HookUserMsg("Health",oldHealthMessage);
+        if(oldArmorMessage) g_pMetaHookAPI->HookUserMsg("Battery",oldArmorMessage);
     }
-    if (g_pMetaHookAPI) {
-        if(redrawHook)g_pMetaHookAPI->UnHook(redrawHook);
-        if(initHook)g_pMetaHookAPI->UnHook(initHook);
-        if(viewHook)g_pMetaHookAPI->UnHook(viewHook);
-        if(spriteHook)g_pMetaHookAPI->UnHook(spriteHook);
-        if(scaleHook)g_pMetaHookAPI->UnHook(scaleHook);
-        if(drawHook)g_pMetaHookAPI->UnHook(drawHook);
-        if(drawAdditiveHook)g_pMetaHookAPI->UnHook(drawAdditiveHook);
-        if(drawHolesHook)g_pMetaHookAPI->UnHook(drawHolesHook);
-        if(textColorHook)g_pMetaHookAPI->UnHook(textColorHook);
-        if(consoleHook)g_pMetaHookAPI->UnHook(consoleHook);
-        if(fillHook)g_pMetaHookAPI->UnHook(fillHook);
-    }
-    redrawHook=initHook=viewHook=spriteHook=scaleHook=nullptr;
-    drawHook=drawAdditiveHook=drawHolesHook=textColorHook=nullptr;
-    consoleHook=fillHook=nullptr;
-    nativeHooksEnabled=false;
-    oldRedraw=nullptr;oldInit=nullptr;oldView=nullptr;oldSprite=nullptr;oldScale=nullptr;
-    oldDraw=nullptr;oldDrawAdditive=nullptr;oldDrawHoles=nullptr;oldTextColor=nullptr;
-    oldConsole=nullptr;oldFill=nullptr;
-    insideHudRedraw=false;drawingCustomOverlay=false;cachedScreenHeight=cachedScreenWidth=0;
-    // User-message hooks are scoped to the client DLL's lifetime; they are not
-    // replaced with invalid stale function pointers after client reload.
     msgHooksInstalled=false;oldHealthMessage=oldArmorMessage=nullptr;
-    // The engine still owns the registered CVars/commands on level transitions.
-    // Do not re-register them on the same host instance.
+    insideHudRedraw=drawingCustomOverlay=false;
     health=armor=-1;speed=0;
 }
-} // namespace
-
-
-namespace {
-void onClientShutdown();
-void stopHud() {
-    addon_log::write("hudedit","hudedit_stop requested");
-    if(hudSessionActive && pendingExports) {
-        if(pendingExports->HUD_Redraw==&onRedraw)
-            pendingExports->HUD_Redraw=oldRedraw;
-        if(pendingExports->V_CalcRefdef==&onView)
-            pendingExports->V_CalcRefdef=oldView;
-        if(pendingExports->HUD_Shutdown==&onClientShutdown)
-            pendingExports->HUD_Shutdown=originalShutdown;
-    }
-    hudSessionActive=false;
-    cleanup();
-    originalShutdown=nullptr;
-}
 void onClientShutdown() {
-    addon_log::write("hudedit","client HUD_Shutdown");
-    ShutdownFn saved=originalShutdown;
-    stopHud();
-    pendingExports=nullptr;
-    if(saved) saved();
+    // Do not detach callbacks on stop/start: another plugin may have chained
+    // our callbacks already. Keep the chain alive until the client unloads.
+    cleanup();
+    if(originalShutdown) originalShutdown();
 }
+void enableMessages();
+void enableNativeHooks();
 void startHud() {
-    addon_log::write("hudedit","hudedit_start requested");
     if(hudSessionActive) return;
-    if(!pendingExports) {
-        addon_log::write("hudedit","start rejected: LoadClient not ready");
-        return;
-    }
-    auto* exp=pendingExports;
-    if(!exp->HUD_Redraw || !exp->V_CalcRefdef || !exp->HUD_Shutdown) {
-        addon_log::write("hudedit","start rejected: missing client export");
-        return;
-    }
-    oldRedraw=exp->HUD_Redraw;
-    oldView=exp->V_CalcRefdef;
-    originalShutdown=exp->HUD_Shutdown;
-    if(oldRedraw==&onRedraw || oldView==&onView ||
-       originalShutdown==&onClientShutdown) {
-        addon_log::write("hudedit","start rejected: recursive callback");
-        oldRedraw=nullptr;oldView=nullptr;originalShutdown=nullptr;
-        return;
-    }
-    // Both callback pointers are replaced only AFTER game startup.
-    exp->HUD_Redraw=&onRedraw;
-    exp->V_CalcRefdef=&onView;
-    exp->HUD_Shutdown=&onClientShutdown;
-    hudSessionActive=true;
-    wasEverActivated=true;
-    // Existing usermessage callbacks may be registered by this time.
-    // UserMsg hooks have a different lifecycle and may leave callbacks inside
-    // client.dll after a plugin unload. They are intentionally opt-in below.
-    addon_log::write("hudedit","hudedit_start client callbacks attached");
+    hudSessionActive=settingsRegistered;
+    if(!hudSessionActive) return;
+    enableMessages();
+    enableNativeHooks();
+    addon_log::write("hudedit","automatic HUD callbacks active");
 }
 void enableMessages() {
     addon_log::write("hudedit","hudedit_messages_on requested");
@@ -710,7 +634,7 @@ void enableMessages() {
 }
 void enableNativeHooks() {
     addon_log::write("hudedit","hudedit_native_on requested");
-    if(nativeHooksEnabled || !hudSessionActive || !g_pMetaHookAPI) {
+    if(nativeHooksEnabled || !hudSessionActive || !g_pMetaHookAPI || !g_pMetaHookAPI->InlineHook) {
         addon_log::write("hudedit","native hooks not activated: call hudedit_start first");
         return;
     }
@@ -745,7 +669,7 @@ void enableNativeHooks() {
     nativeHooksEnabled=bool(spriteHook||drawHook||drawAdditiveHook||
         drawHolesHook||textColorHook||consoleHook||fillHook);
     addon_log::write("hudedit",nativeHooksEnabled?
-        "native hooks installed (experimental)":"native hooks unavailable");
+        "native HUD renderer hooks installed":"native HUD renderer hooks unavailable");
 }
 void disableNativeHooks() {
     addon_log::write("hudedit","hudedit_native_off requested");
@@ -762,8 +686,8 @@ void disableNativeHooks() {
 } // namespace
 
 namespace {
-// Initialize advanced cvars ONLY after Sven Co-op main menu has opened,
-// and the player explicitly enters hudedit_init.
+// Settings are registered after the original HUD_Init, using the live
+// engine table received by Initialize. Manual init remains an idempotent alias.
 
 void hudeditStatus() {
     const bool init=settingsRegistered;
@@ -801,7 +725,7 @@ void hudeditStatus() {
     if(gEngfuncs.Con_Printf)
         gEngfuncs.Con_Printf(missing ?
             "HUD Edit: missing CVars; send SvenBXT_addons_boot.log\n" :
-            "HUD Edit: core CVars found. Use hudedit_start for overlay.\n");
+            "HUD Edit: core CVars found. Automatic startup ready.\n");
 }
 
 void hudeditSet() {
@@ -838,18 +762,8 @@ void hudeditSet() {
     }
     if(gEngfuncs.Cvar_SetValue)
         gEngfuncs.Cvar_SetValue(name.c_str(),value);
-    bool temporary=false;
-    if(std::fabs(target->value-value)>.001f) {
-        // The console CVar resolver may be incompatible with the MetaHook
-        // client registration on this Sven Co-op build. Keep the in-memory
-        // control usable; this direct fallback is NOT archived/persistent.
-        target->value=value;
-        temporary=true;
-        addon_log::write("hudedit","hudedit_set used temporary pointer fallback");
-    }
     if(gEngfuncs.Con_Printf)
-        gEngfuncs.Con_Printf("HUD Edit: %s = %.3f%s\n",name.c_str(),
-            target->value,temporary?" (temporary, not saved)":"");
+        gEngfuncs.Con_Printf("HUD Edit: %s = %.3f\n",name.c_str(),target->value);
 }
 void hudeditHelp() {
     if(gEngfuncs.Con_Printf)
@@ -859,7 +773,7 @@ void hudeditHelp() {
             "Flashlight: hudedit_flashlight_enabled 1, hudedit_flashlight_use_theme 0, hudedit_flashlight_r/g/b\n");
 }
 void lazyInitialize() {
-    addon_log::write("hudedit","hudedit_init invoked");
+    addon_log::write("hudedit","initialize settings");
     if(!settingsRegistered) {
         registeredCount=0;
         failedRegistrationCount=0;
@@ -876,6 +790,9 @@ void lazyInitialize() {
     }
     if(!colorCommandRegistered && gEngfuncs.pfnAddCommand) {
         addon_log::write("hudedit","hudedit_init before extra commands");
+        gEngfuncs.pfnAddCommand("hudedit_init",&lazyInitialize);
+        gEngfuncs.pfnAddCommand("hudedit_status",&hudeditStatus);
+        gEngfuncs.pfnAddCommand("hudedit_help",&hudeditHelp);
         gEngfuncs.pfnAddCommand("hudedit_color",&changeColorCommand);
         gEngfuncs.pfnAddCommand("hudedit_start",&startHud);
         gEngfuncs.pfnAddCommand("hudedit_stop",&stopHud);
@@ -889,7 +806,19 @@ void lazyInitialize() {
     addon_log::write("hudedit",settingsRegistered ?
         "hudedit_init completed: CVars registered" :
         "hudedit_init completed: CVAR REGISTRATION INCOMPLETE");
-    hudeditStatus();
+    HudEditOptions_Register();
+}
+int onInitialize(cl_enginefunc_t* engine,int version) {
+    if(engine) gEngfuncs=*engine;
+    return originalCallbacks.Initialize?originalCallbacks.Initialize(engine,version):1;
+}
+void onFrame(double time) {
+    if(originalCallbacks.HUD_Frame) originalCallbacks.HUD_Frame(time);
+    HudEditOptions_Register();
+}
+int onVidInit() {
+    health=armor=-1;speed=0;
+    return originalCallbacks.HUD_VidInit?originalCallbacks.HUD_VidInit():1;
 }
 } // namespace
 
@@ -897,41 +826,25 @@ void IPluginsV4::Init(metahook_api_t* api,mh_interface_t* i,mh_enginesave_t* sav
     g_pMetaHookAPI=api;g_pInterface=i;g_pMetaSave=save;
     addon_log::write("hudedit","V4 Init");
 }
-void IPluginsV4::LoadEngine(cl_enginefunc_t* engine) {
-    addon_log::write("hudedit","LoadEngine entry");
-    if(!engine) {
-        addon_log::write("hudedit","LoadEngine engine ptr null");
-        return;
-    }
-    gEngfuncs=*engine;
-    // No calls to engine pfnRegisterVariable or pfnAddCommand in LoadEngine.
-    // These were the only actions between begin and the failed startup log.
-    addon_log::write("hudedit","LoadEngine completed (zero registrations)");
+void IPluginsV4::LoadEngine(cl_enginefunc_t*) {
+    addon_log::write("hudedit","LoadEngine: waiting for client Initialize");
 }
 void IPluginsV4::LoadClient(cl_exportfuncs_t* exports) {
-    addon_log::write("hudedit","LoadClient entry");
-    pendingExports=exports;
-    if(!safeCommandsRegistered && gEngfuncs.pfnAddCommand) {
-        addon_log::write("hudedit","LoadClient before diagnostic commands");
-        gEngfuncs.pfnAddCommand("hudedit_init",&lazyInitialize);
-        gEngfuncs.pfnAddCommand("hudedit_status",&hudeditStatus);
-        gEngfuncs.pfnAddCommand("hudedit_help",&hudeditHelp);
-        safeCommandsRegistered=true;
-        addon_log::write("hudedit","LoadClient init/status/help commands registered");
-    }
-    addon_log::write("hudedit","LoadClient completed (no engine hooks)");
+    if(!exports) return;
+    originalCallbacks=*exports;
+    oldInit=exports->HUD_Init;oldRedraw=exports->HUD_Redraw;
+    oldView=exports->V_CalcRefdef;originalShutdown=exports->HUD_Shutdown;
+    exports->Initialize=&onInitialize;
+    exports->HUD_Init=&onHudInit;
+    exports->HUD_VidInit=&onVidInit;
+    exports->HUD_Redraw=&onRedraw;
+    exports->V_CalcRefdef=&onView;
+    exports->HUD_Frame=&onFrame;
+    exports->HUD_Shutdown=&onClientShutdown;
+    HudEditOptions_Register();
+    addon_log::write("hudedit","LoadClient: callbacks chained, no engine registrations");
 }
-void IPluginsV4::ExitGame(int) {
-    addon_log::write("hudedit","V4 ExitGame");
-    // The HUD_Shutdown callback normally performs the safe restore.
-    // Do not dereference a potentially unloaded client export table here.
-    cleanup();
-    pendingExports=nullptr;hudSessionActive=false;
-}
-void IPluginsV4::Shutdown() {
-    addon_log::write("hudedit","V4 Shutdown");
-    cleanup();
-    pendingExports=nullptr;hudSessionActive=false;
-}
-const char* IPluginsV4::GetVersion() { return "2.2.0-diagnostic"; }
+void IPluginsV4::ExitGame(int) { cleanup(); }
+void IPluginsV4::Shutdown() { cleanup(); }
+const char* IPluginsV4::GetVersion() { return "2.3.0"; }
 EXPOSE_SINGLE_INTERFACE(IPluginsV4,IPluginsV4,METAHOOK_PLUGIN_API_VERSION_V4);
